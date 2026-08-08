@@ -1,0 +1,148 @@
+# Paper-faithful TS-JEPA baseline configuration
+# Source of truth: docs/TS-JEPA_Paper-Faithful_Final.md
+# Unspecified values are IMPLEMENTATION CHOICE (see docs/IMPLEMENTATION_CHOICES.md)
+
+paper:
+  version: "published IEEE IoT Journal 2026"
+  title: "Time-Series JEPA for Predictive Remote Control Under Capacity-Limited Networks"
+
+paths:
+  data_root: data
+  runs_root: runs
+
+simulation:
+  environment: inverted_cart_pole
+  state_representation: RGB
+  sampling_interval_ms: 1
+  dt: 0.001
+  trajectory_steps: 100
+  control_min_N: -20.0
+  control_max_N: 20.0
+  process_noise_std: 0.0  # Ns=0 deterministic baseline (IC)
+  desired_state: [0.0, 0.0, 0.0, 0.0]  # IC
+  render_height: 96  # IC — not a paper-required camera resolution
+  render_width: 192  # IC
+  position_tol: 0.05
+  angle_tol: 0.05
+  physics:  # IMPLEMENTATION CHOICE
+    cart_mass: 1.0
+    pole_mass: 0.1
+    pole_length: 0.5
+    gravity: 9.81
+    track_limit: 2.4
+
+control_teacher:  # method PAPER-SPECIFIED; numeric grids PAPER-SILENT → IC
+  force_min_N: -20.0
+  force_max_N: 20.0
+  force_bins: 11
+  control_effort_weight: 0.001
+  discount: 0.99
+  value_iteration_iters: 25
+  grid:
+    x: [-1.2, 1.2, 9]
+    x_dot: [-2.5, 2.5, 7]
+    theta: [-0.35, 0.35, 9]
+    theta_dot: [-3.0, 3.0, 7]
+
+input:
+  channels_per_rgb_frame: 3
+  resize: [64, 128]
+  kappa: 2
+  multi_frame_tensor_construction: channel_concat  # IMPLEMENTATION CHOICE
+  color_jitter:
+    brightness: 0.05
+    contrast: 0.10
+    saturation: 0.10
+    hue: 0.05
+  color_drop_probability: 0.05
+  normalization:
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+  gaussian_kernel: [5, 5]
+  gaussian_sigma_range: [0.1, 0.2]
+  command_normalization: z-score
+
+ts_jepa:
+  encoder:
+    type: deep_convolutional_resnet
+    widths: [64, 128, 256]
+    batch_norm: true
+    activation: ReLU
+    embedding_dim: 256
+    embedding_dim_status: paper_implied_baseline
+    fig7_candidate_dimensions: [64, 128, 256, 350]
+    blocks_per_stage: 2  # IC
+  target_encoder:
+    ema_decay: 0.99
+  predictor:
+    type: MLP
+    hidden_dim: 1024
+    output_dim: 256
+    input_tensor_construction: concat_embedding_and_command  # IC
+  prediction_horizon:
+    Kp: 15
+  optimizer:
+    type: SGD
+    learning_rate: 0.2
+    batch_size: 256
+    epochs: 150
+    weight_decay: 0.0004
+  lr_decay:
+    factor: 0.99
+    interval_epochs: 20
+  loss:
+    paper_objective: cosine_similarity_alignment
+    implementation: one_minus_cosine_similarity
+  early_stopping:
+    enabled: true
+    patience: 20  # IC
+    validation_trajectory_count: 20  # IC — not specified by paper
+  dataset:
+    train_trajectories: 200
+    test_trajectories: 40
+
+semantic_actor:
+  architecture:
+    type: MLP
+    hidden_dims: [1024, 256]
+    activation: ReLU
+    dropout: 0.2
+    output_activation: linear_then_clip_after_denorm  # IC
+  optimizer:
+    type: AdamW
+    learning_rate: 0.006
+    batch_size: 200
+    epochs: 300
+    weight_decay: 0.01
+  loss: MSE
+  early_stopping:
+    enabled: true
+    patience: 30  # IC
+  dataset:
+    train_trajectories: 100
+    test_trajectories: 20
+
+wireless:  # networking layer — not part of neural TS-JEPA
+  hall_size_m: [300.0, 150.0]
+  room_height_m: 6.0
+  bs_height_m: 10.0
+  device_height_m: 1.5
+  carrier_frequency_hz: 3750000000.0
+  total_bandwidth_hz: 20000000.0
+  clutter_height_m: 3.0
+  clutter_size_m: 2.0
+  clutter_density: 0.60
+  distance_2d_m: 50.0
+  noise_power_db: -95.0
+  snr_targets_db: [5, 10, 20]
+  max_devices_scheduled_J: 2  # IC
+  p_max_watt: 0.2  # IC
+  drift_plus_penalty_V: 1.0  # IC
+  virtual_queue_arrival: 1.0  # IC
+  num_devices: 4  # IC for multi-device eval
+
+evaluation:
+  repetitions: 5
+  reported_result: best
+  control_position_tol: 0.05
+  control_angle_tol: 0.05
