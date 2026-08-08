@@ -10,6 +10,10 @@ class Predictor(nn.Module):
 
     Paper-specified: hidden 1024, output 256.
     Input concat(z, u_norm) is IMPLEMENTATION CHOICE.
+
+    During TS-JEPA training, u_norm is the trajectory/teacher control sequence
+    from the dataset (DP teacher), not Semantic Actor-predicted commands.
+    At lost-packet runtime, conditioning uses the runtime command sequence.
     """
 
     def __init__(self, embedding_dim: int = 256, command_dim: int = 1, hidden_dim: int = 1024) -> None:

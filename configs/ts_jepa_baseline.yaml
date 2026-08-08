@@ -96,10 +96,10 @@ ts_jepa:
   early_stopping:
     enabled: true
     patience: 20  # IC
-    validation_trajectory_count: 20  # IC — not specified by paper
+    validation_trajectory_count: 20  # IC — carved from train only; not paper-specified
   dataset:
     train_trajectories: 200
-    test_trajectories: 40
+    test_trajectories: 40  # untouched; never used for model selection
 
 semantic_actor:
   architecture:
@@ -118,11 +118,13 @@ semantic_actor:
   early_stopping:
     enabled: true
     patience: 30  # IC
+    val_fraction: 0.2  # IC — holdout from actor train only; test set untouched
   dataset:
     train_trajectories: 100
-    test_trajectories: 20
+    test_trajectories: 20  # untouched; never used for model selection
 
 wireless:  # networking layer — not part of neural TS-JEPA
+  # Table IV / geometry (paper-specified)
   hall_size_m: [300.0, 150.0]
   room_height_m: 6.0
   bs_height_m: 10.0
@@ -134,15 +136,18 @@ wireless:  # networking layer — not part of neural TS-JEPA
   clutter_density: 0.60
   distance_2d_m: 50.0
   noise_power_db: -95.0
+  shadow_fading_std_db: 4.0  # paper-specified for PL_dB model
   snr_targets_db: [5, 10, 20]
-  max_devices_scheduled_J: 2  # IC
-  p_max_watt: 0.2  # IC
-  drift_plus_penalty_V: 1.0  # IC
-  virtual_queue_arrival: 1.0  # IC
-  num_devices: 4  # IC for multi-device eval
+  # Remaining scalars are IMPLEMENTATION CHOICE (not numerically stated in Final.md)
+  max_devices_scheduled_J: 2
+  p_max_watt: 0.2
+  drift_plus_penalty_V: 1.0
+  aoi_threshold_beta_th: 5.0
+  num_devices: 4
 
 evaluation:
   repetitions: 5
+  seeds: [0, 1, 2, 3, 4]
   reported_result: best
   control_position_tol: 0.05
   control_angle_tol: 0.05

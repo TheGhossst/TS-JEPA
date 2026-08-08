@@ -62,14 +62,16 @@ class TrajectoryDataset(Dataset):
                 self.pipeline.make_context_tensor(frames, time_index + offset, self.kappa)
             )
         future_stack = torch.stack(future_contexts, dim=0)
-        command_slice = commands[time_index : time_index + self.kp].astype(np.float32)
-        command_norm = self.normalizer.normalize(command_slice)
+        # Trajectory/teacher control sequence from the DP teacher dataset.
+        # This is NOT Semantic Actor-predicted command ũ during JEPA training.
+        teacher_commands = commands[time_index : time_index + self.kp].astype(np.float32)
+        teacher_commands_norm = self.normalizer.normalize(teacher_commands)
 
         return {
             "context": context,
             "future_frames": future_stack,  # [Kp, C_kappa, H, W]
-            "commands": torch.from_numpy(command_slice.copy()),
-            "commands_norm": torch.from_numpy(command_norm.copy()),
+            "teacher_commands": torch.from_numpy(teacher_commands.copy()),
+            "teacher_commands_norm": torch.from_numpy(teacher_commands_norm.copy()),
             "time_index": torch.tensor(time_index, dtype=torch.long),
         }
 

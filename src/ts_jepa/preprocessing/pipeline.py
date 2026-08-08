@@ -68,7 +68,8 @@ class PreprocessPipeline:
 
     def process_frame(self, frame: np.ndarray, stochastic: bool | None = None) -> torch.Tensor:
         use_aug = self.training if stochastic is None else stochastic
-        rng = np.random.default_rng()
+        # Draw from the process-wide NumPy RNG so torch/numpy seeding in trainers is honored.
+        rng = np.random.default_rng(int(np.random.randint(0, 2**31 - 1)))
         image = self._pil_from_rgb(frame)
         if use_aug:
             image = self._color_jitter(image, rng)

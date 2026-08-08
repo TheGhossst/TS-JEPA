@@ -6,7 +6,12 @@ from ts_jepa.evaluation.metrics import (
     control_score,
     nmae,
 )
-from ts_jepa.evaluation.evaluate import baseline_report, evaluate_closed_loop, evaluate_with_scheduler
+from ts_jepa.evaluation.evaluate import (
+    baseline_report,
+    evaluate_closed_loop,
+    evaluate_prediction_horizon_nmae,
+    evaluate_with_scheduler,
+)
 
 __all__ = [
     "communication_bits_embedding",
@@ -15,5 +20,6 @@ __all__ = [
     "nmae",
     "baseline_report",
     "evaluate_closed_loop",
+    "evaluate_prediction_horizon_nmae",
     "evaluate_with_scheduler",
 ]

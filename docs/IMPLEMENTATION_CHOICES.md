@@ -53,6 +53,7 @@ Do not treat these as paper facts.
 |--------|-------|
 | Per-step input | `concat(z, u_norm)` with `u_norm` shape `[B,1]` |
 | Multi-step | autoregressive feedback of predicted `z` |
+| JEPA training commands | trajectory/teacher DP control sequence (normalized) | not Semantic Actor `ũ` |
 
 ## Semantic actor output
 
@@ -61,30 +62,55 @@ Do not treat these as paper facts.
 | Network output | linear (normalized command domain) |
 | Runtime | `u = u_norm * σ + μ`, then clip to `[-20, +20]` N |
 
-## Validation / early stopping
+## Validation / early stopping / repetitions
 
 | Choice | Value | Notes |
 |--------|-------|-------|
-| JEPA val trajectory count | `20` held out from the 200 train trajectories | paper enables early stopping but does not specify count |
+| JEPA val trajectory count | `20` held out from the 200 **train** trajectories | paper enables ES but does not specify count |
 | JEPA patience | `20` epochs | unspecified |
+| Actor val | `20%` holdout from actor **train** embeddings | test trajectories untouched |
 | Actor patience | `30` epochs | unspecified |
-| Actor val | actor test split used for early stopping monitor | unspecified |
+| JEPA/actor test sets | 40 / 20 trajectories | used only for post-hoc reporting, never model selection |
+| Repetition seeds | `{0,1,2,3,4}` | paper requires 5 reps + best result; seed values unspecified |
+| Best-run criterion (JEPA) | lowest validation cosine-alignment loss | paper-compatible validation performance |
+| Best-run criterion (actor) | lowest validation MSE | paper-compatible validation performance |
 
 ## Wireless / scheduler (networking layer)
 
-Table IV geometry/radio parameters follow the published paper summary.
-The following closed forms remain implementation choices:
+### Paper-specified (implemented)
+
+- InF-SH path loss eqs. (4)–(7), LoS probability (5), Rayleigh `|H|^2`
+- SNR model (8), required power (23)
+- AoI update (17), virtual queue (18)
+- Algorithm 2 feasibility / Top-J flow
+- Table IV geometry/radio scalars and `γ_th ∈ {5,10,20}` dB
+- Shadow fading std `4.0` dB on general PL model
+
+### Index selection reconciliation (documented choice)
+
+Paper eq. (24) **minimizes** `Σ α_i C_i` with
+
+`C_i = 1 - (β+1)^2 - 2 Q β + V p_req` (same expression as typeset eq. 25).
+
+Algorithm 2 selects the **largest positive** indices. The code therefore uses
+
+`U_i = -C_i`
+
+and selects Top-J devices with `U_i > 0`. This preserves Algorithm 2’s selection
+rule while remaining consistent with the minimization in (24).
+
+### Still IMPLEMENTATION CHOICE (no numerical value in Final.md)
 
 | Choice | Value |
 |--------|-------|
 | Max scheduled devices `J` | `2` |
+| Device count `I` | `4` |
 | `p_max` | `0.2` W |
 | Drift-plus-penalty `V` | `1.0` |
-| Virtual-queue arrival | `1.0` |
-| Eval device count | `4` |
-| Path-loss + clutter mapping | free-space × density attenuation |
-| Small-scale fading | Rayleigh amplitude |
-| Index `S` | `V * AoI + Q - p_req / p_max` |
+| AoI threshold `β_th` | `5.0` |
+
+Hall size / room height / bandwidth are stored from Table IV; path-loss uses the
+paper distance/height/clutter formulas above (hall polygon layout not simulated).
 
 ## Out of scope until baseline validated
 
