@@ -80,6 +80,12 @@ def test_end_to_end_smoke(tmp_path: Path):
     assert "control" in report
     assert "prediction_horizon_nmae" in report
     assert report["prediction_horizon_nmae"]["kp"] == 5
+    assert "nmae_by_horizon" in report["prediction_horizon_nmae"]
+    assert set(report["prediction_horizon_nmae"]["nmae_by_horizon"]) == {str(h) for h in range(1, 6)}
     assert report["prediction_horizon_nmae"]["split"] == "jepa_test_untouched"
+    assert "test_losses" in report
+    assert report["test_losses"]["jepa"]["best_test_loss"] is not None
+    assert report["test_losses"]["semantic_actor"]["best_test_loss"] is not None
+    assert report["test_losses"]["jepa"]["source"] == "repetition_summary"
     assert "wireless" in report
     assert "channel_aware" in report["wireless"]

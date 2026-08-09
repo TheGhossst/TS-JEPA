@@ -1,0 +1,10 @@
+# Experiment overlay for the corrected-DP-teacher dataset (`data_dp_fixed`).
+# Inherits all paper-faithful model/hparams from ts_jepa_baseline.yaml.
+# Only paths / run directory names differ so old `data/` and `runs/ts_jepa/` stay untouched.
+_base: ts_jepa_baseline.yaml
+
+paths:
+  data_root: data_dp_fixed
+  runs_root: runs
+  ts_jepa_dirname: ts_jepa_dp_fixed
+  semantic_actor_dirname: semantic_actor_dp_fixed

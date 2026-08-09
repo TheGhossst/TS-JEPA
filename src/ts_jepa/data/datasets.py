@@ -29,39 +29,55 @@ class TrajectoryDataset(Dataset):
         self.normalizer = normalizer
         self.training = training
         self.kp = kp or config["ts_jepa"]["prediction_horizon"]["Kp"]
-        self.kappa = config["input"]["kappa"]
+        self.kappa = int(config["input"]["kappa"])
         self.trajectory_steps = config["simulation"]["trajectory_steps"]
         self.pipeline = PreprocessPipeline(config, training=training)
         self.files = sorted(self.trajectory_dir.glob("*.npz"))
+        self.frames: list[np.ndarray] = []
+        self.commands: list[np.ndarray] = []
         self.index_map: list[tuple[int, int]] = []
         for file_idx, file_path in enumerate(self.files):
             with np.load(file_path) as data:
-                length = int(data["commands"].shape[0])
+                frames = np.asarray(data["frames"])
+                commands = np.asarray(data["commands"], dtype=np.float32)
+            self.frames.append(frames)
+            self.commands.append(commands)
+            length = int(commands.shape[0])
             max_start = length - self.kp - 1
             for time_index in range(max(0, max_start + 1)):
                 self.index_map.append((file_idx, time_index))
 
+        # Deterministic eval path: cache resized+normalized RGB frames once.
+        self._eval_cache: list[list[torch.Tensor] | None] = [None] * len(self.files)
+        if not training:
+            for file_idx, frames in enumerate(self.frames):
+                self._eval_cache[file_idx] = [
+                    self.pipeline.process_frame(frames[t], stochastic=False) for t in range(frames.shape[0])
+                ]
+
     def __len__(self) -> int:
         return len(self.index_map)
 
-    def _load_trajectory(self, file_idx: int) -> tuple[np.ndarray, np.ndarray]:
-        file_path = self.files[file_idx]
-        with np.load(file_path) as data:
-            frames = data["frames"]
-            commands = data["commands"]
-        return frames, commands
-
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         file_idx, time_index = self.index_map[index]
-        frames, commands = self._load_trajectory(file_idx)
+        frames = self.frames[file_idx]
+        commands = self.commands[file_idx]
 
-        context = self.pipeline.make_context_tensor(frames, time_index, self.kappa)
-        future_contexts = []
-        for offset in range(1, self.kp + 1):
-            future_contexts.append(
-                self.pipeline.make_context_tensor(frames, time_index + offset, self.kappa)
-            )
-        future_stack = torch.stack(future_contexts, dim=0)
+        if self._eval_cache[file_idx] is not None:
+            processed = {t: self._eval_cache[file_idx][t] for t in range(frames.shape[0])}
+        else:
+            start = max(0, time_index - self.kappa + 1)
+            end = time_index + self.kp
+            processed = self.pipeline.process_frames_cached(frames, start, end, stochastic=self.training)
+
+        context = self.pipeline.assemble_context(processed, time_index, kappa=self.kappa)
+        future_stack = torch.stack(
+            [
+                self.pipeline.assemble_context(processed, time_index + offset, kappa=self.kappa)
+                for offset in range(1, self.kp + 1)
+            ],
+            dim=0,
+        )
         # Trajectory/teacher control sequence from the DP teacher dataset.
         # This is NOT Semantic Actor-predicted command ũ during JEPA training.
         teacher_commands = commands[time_index : time_index + self.kp].astype(np.float32)
@@ -92,7 +108,7 @@ class ActorEmbeddingDataset(Dataset):
         self.config = config
         self.normalizer = normalizer
         self.pipeline = PreprocessPipeline(config, training=False)
-        self.kappa = config["input"]["kappa"]
+        self.kappa = int(config["input"]["kappa"])
         self.files = sorted(self.trajectory_dir.glob("*.npz"))
         self.samples: list[tuple[torch.Tensor, float]] = []
 
@@ -100,15 +116,23 @@ class ActorEmbeddingDataset(Dataset):
         with torch.no_grad():
             for file_path in self.files:
                 with np.load(file_path) as data:
-                    frames = data["frames"]
-                    commands = data["commands"]
+                    frames = np.asarray(data["frames"])
+                    commands = np.asarray(data["commands"], dtype=np.float32)
+                cached = [self.pipeline.process_frame(frames[t], stochastic=False) for t in range(len(commands))]
+                batch_contexts = []
+                batch_cmds = []
                 for time_index in range(len(commands)):
-                    context = self.pipeline.make_context_tensor(frames, time_index, self.kappa)
-                    embedding = encoder(context.unsqueeze(0).to(device)).squeeze(0).cpu()
-                    command_norm = float(
-                        self.normalizer.normalize(np.array([commands[time_index]], dtype=np.float32))[0]
-                    )
-                    self.samples.append((embedding, command_norm))
+                    processed = {t: cached[t] for t in range(len(cached))}
+                    context = self.pipeline.assemble_context(processed, time_index, kappa=self.kappa)
+                    batch_contexts.append(context)
+                    batch_cmds.append(float(self.normalizer.normalize(np.array([commands[time_index]], dtype=np.float32))[0]))
+                # Encode in mini-batches for speed.
+                bs = 64
+                for start in range(0, len(batch_contexts), bs):
+                    chunk = torch.stack(batch_contexts[start : start + bs], dim=0).to(device)
+                    emb = encoder(chunk).cpu()
+                    for i in range(emb.shape[0]):
+                        self.samples.append((emb[i], batch_cmds[start + i]))
 
     def __len__(self) -> int:
         return len(self.samples)

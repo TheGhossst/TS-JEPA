@@ -6,9 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 
-import torch
-
-from ts_jepa.config import load_config
+from ts_jepa.config import apply_cli_path_overrides, jepa_run_dirname, load_config, project_root
+from ts_jepa.device import describe_device, select_device
 from ts_jepa.training.train_jepa import train_ts_jepa, train_ts_jepa_repetitions
 
 
@@ -23,9 +22,31 @@ def main() -> None:
         default=None,
         help="If set, train only this seed instead of the full repetition protocol.",
     )
+    parser.add_argument(
+        "--data-root",
+        type=str,
+        default=None,
+        help="Override config paths.data_root (e.g. data_dp_fixed).",
+    )
+    parser.add_argument(
+        "--runs-root",
+        type=str,
+        default=None,
+        help="Override config paths.runs_root.",
+    )
     args = parser.parse_args()
     config = load_config(args.config)
-    device = torch.device(args.device) if args.device else None
+    apply_cli_path_overrides(config, data_root=args.data_root, runs_root=args.runs_root)
+    device = select_device(args.device)
+    print(describe_device(device))
+    print(
+        {
+            "data_root": str(project_root(config) / config["paths"]["data_root"]),
+            "jepa_runs": str(
+                project_root(config) / config["paths"]["runs_root"] / jepa_run_dirname(config)
+            ),
+        }
+    )
     if args.single_seed is not None:
         result = train_ts_jepa(config, device=device, max_epochs=args.epochs, seed=args.single_seed)
     else:

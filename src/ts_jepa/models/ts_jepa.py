@@ -39,11 +39,20 @@ class TSJEPA(nn.Module):
         return self.context_encoder(context)
 
     @torch.no_grad()
-    def encode_targets(self, future_frames: torch.Tensor) -> torch.Tensor:
-        """future_frames: [B, Kp, C_kappa, H, W] → [B, Kp, D]."""
+    def encode_targets(self, future_frames: torch.Tensor, chunk_size: int = 256) -> torch.Tensor:
+        """
+        future_frames: [B, Kp, C_kappa, H, W] → [B, Kp, D].
+
+        Chunked forward is an IMPLEMENTATION CHOICE for GPU memory. Target encoder
+        runs in eval/no-grad, so BatchNorm uses running stats and chunking does not
+        change outputs vs a single mega-batch.
+        """
         b, kp, c, h, w = future_frames.shape
         flat = future_frames.reshape(b * kp, c, h, w)
-        emb = self.target_encoder(flat)
+        chunks = []
+        for start in range(0, flat.shape[0], int(chunk_size)):
+            chunks.append(self.target_encoder(flat[start : start + int(chunk_size)]))
+        emb = torch.cat(chunks, dim=0)
         return emb.view(b, kp, -1)
 
     def predict(self, embedding: torch.Tensor, commands_norm: torch.Tensor) -> torch.Tensor:

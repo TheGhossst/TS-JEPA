@@ -9,6 +9,7 @@ import torch
 
 from ts_jepa.models.actor import SemanticActor
 from ts_jepa.models.ts_jepa import TSJEPA
+from ts_jepa.device import select_device
 from ts_jepa.preprocessing.command_stats import CommandNormalizer
 from ts_jepa.preprocessing.pipeline import PreprocessPipeline
 
@@ -48,7 +49,7 @@ class FrozenRuntimeController:
         device: torch.device | None = None,
     ) -> None:
         self.config = config
-        self.device = device or torch.device("cpu")
+        self.device = select_device(device)
         self.jepa = jepa.to(self.device).eval()
         self.actor = actor.to(self.device).eval()
         for module in (self.jepa, self.actor):
@@ -73,7 +74,7 @@ class FrozenRuntimeController:
         actor_ckpt: Path,
         device: torch.device | None = None,
     ) -> "FrozenRuntimeController":
-        device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = select_device(device)
         jepa_payload = torch.load(jepa_ckpt, map_location=device, weights_only=False)
         actor_payload = torch.load(actor_ckpt, map_location=device, weights_only=False)
         jepa = TSJEPA(config)

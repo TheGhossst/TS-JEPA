@@ -25,6 +25,7 @@ class InvertedCartPoleEnv:
         desired_state: list[float] | None = None,
         params: CartPoleParams | None = None,
         process_noise_std: float = 0.0,
+        init_noise: float = 0.05,
     ) -> None:
         self.params = params or CartPoleParams()
         self.ode = CartPoleODE(params=self.params, dt=dt)
@@ -40,12 +41,14 @@ class InvertedCartPoleEnv:
             dtype=np.float64,
         )
         self.process_noise_std = float(process_noise_std)
+        self.init_noise = float(init_noise) if init_noise is not None else 0.05
         self.state = self.desired_state.copy()
 
-    def reset(self, seed: int | None = None, init_noise: float = 0.05) -> np.ndarray:
+    def reset(self, seed: int | None = None, init_noise: float | None = None) -> np.ndarray:
         rng = np.random.default_rng(seed)
-        noise = rng.uniform(-init_noise, init_noise, size=4)
-        # Keep angle relatively small so upright balancing is feasible.
+        noise_scale = float(self.init_noise if init_noise is None else init_noise)
+        noise = rng.uniform(-noise_scale, noise_scale, size=4)
+        # Keep angle relatively smaller than cart states so upright balancing is feasible.
         noise[2] *= 0.5
         self.state = self.desired_state + noise
         return self.state.copy()

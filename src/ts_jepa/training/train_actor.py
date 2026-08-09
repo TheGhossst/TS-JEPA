@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import json
 from pathlib import Path
 from typing import Any
@@ -8,13 +7,28 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import Subset
 from tqdm import tqdm
 
-from ts_jepa.config import project_root
+from ts_jepa.config import actor_run_dirname, jepa_run_dirname, project_root
 from ts_jepa.data.datasets import ActorEmbeddingDataset, load_command_normalizer
+from ts_jepa.device import select_device
+from ts_jepa.evaluation.checkpoints import resolve_run_checkpoint
 from ts_jepa.models.actor import SemanticActor
 from ts_jepa.models.ts_jepa import TSJEPA
+from ts_jepa.runtime import (
+    CUDAPrefetcher,
+    DataLoaderStallError,
+    TrainProgressWatchdog,
+    configure_train_logging,
+    configure_training_runtime,
+    format_exception,
+    gpu_mem_str,
+    make_dataloader,
+    reraise_cuda_context,
+    save_checkpoint,
+    state_dict_to_cpu,
+)
 
 
 def _set_seed(seed: int) -> None:
@@ -41,16 +55,21 @@ def _split_train_val_actor(dataset: ActorEmbeddingDataset, val_fraction: float) 
 
 
 @torch.no_grad()
-def evaluate_mse(actor: SemanticActor, loader: DataLoader, device: torch.device, criterion: nn.Module) -> float:
+def evaluate_mse(actor: SemanticActor, loader, device: torch.device, criterion: nn.Module) -> float:
     actor.eval()
     total = 0.0
     n_batches = 0
-    for batch in loader:
-        emb = batch["embedding"].to(device)
-        target = batch["command_norm"].to(device)
-        pred = actor(emb)
-        total += float(criterion(pred, target).item())
-        n_batches += 1
+    try:
+        for batch in CUDAPrefetcher(loader, device):
+            emb = batch["embedding"]
+            target = batch["command_norm"]
+            pred = actor(emb)
+            total += float(criterion(pred, target).item())
+            n_batches += 1
+    except DataLoaderStallError:
+        raise
+    except Exception as exc:
+        reraise_cuda_context(exc, where=f"evaluate_mse after {n_batches} batches", device=device)
     return total / max(1, n_batches)
 
 
@@ -69,14 +88,73 @@ def train_semantic_actor(
     Early stopping / checkpoint selection uses a holdout from actor train only.
     Untouched actor test trajectories are evaluated after training only.
     """
-    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = select_device(device)
     _set_seed(seed)
+    configure_train_logging()
+    configure_training_runtime(
+        device,
+        cudnn_benchmark=bool(config.get("runtime", {}).get("cudnn_benchmark", True)),
+    )
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
     root = data_root or (project_root(config) / config["paths"]["data_root"])
-    runs = run_dir or (project_root(config) / config["paths"]["runs_root"] / "semantic_actor" / f"seed_{seed}")
+    runs = run_dir or (
+        project_root(config)
+        / config["paths"]["runs_root"]
+        / actor_run_dirname(config)
+        / f"seed_{seed}"
+    )
     runs.mkdir(parents=True, exist_ok=True)
+    runtime_cfg = config.get("runtime", {})
+    watchdog = TrainProgressWatchdog(
+        device=device,
+        name=f"actor-seed{seed}",
+        log_path=runs / "train.log",
+        heartbeat_s=float(runtime_cfg.get("heartbeat_s", 30.0)),
+        stall_timeout_s=float(runtime_cfg.get("stall_timeout_s", 180.0)),
+    )
+    watchdog.log(f"start device={device} GPU={gpu_mem_str(device)}")
 
-    ckpt_path = jepa_checkpoint or (project_root(config) / config["paths"]["runs_root"] / "ts_jepa" / "best.pt")
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    try:
+        return _train_semantic_actor_body(
+            config=config,
+            device=device,
+            max_epochs=max_epochs,
+            data_root=root,
+            seed=seed,
+            runs=runs,
+            jepa_checkpoint=jepa_checkpoint,
+            watchdog=watchdog,
+        )
+    except Exception as exc:
+        watchdog.log(f"FATAL {type(exc).__name__}: {exc}")
+        watchdog.log(format_exception(exc))
+        raise
+    finally:
+        watchdog.set_stage("done")
+        watchdog.stop()
+
+
+def _train_semantic_actor_body(
+    *,
+    config: dict[str, Any],
+    device: torch.device,
+    max_epochs: int | None,
+    data_root: Path,
+    seed: int,
+    runs: Path,
+    jepa_checkpoint: Path | None,
+    watchdog: TrainProgressWatchdog,
+) -> dict[str, Any]:
+    root = data_root
+    if jepa_checkpoint is not None:
+        ckpt_path = Path(jepa_checkpoint)
+    else:
+        ckpt_path = resolve_run_checkpoint(
+            project_root(config) / config["paths"]["runs_root"],
+            jepa_run_dirname(config),
+        )
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     jepa = TSJEPA(config).to(device)
     jepa.load_state_dict(ckpt["model"])
     jepa.eval()
@@ -107,9 +185,27 @@ def train_semantic_actor(
     )
     criterion = nn.MSELoss()
     batch_size = int(opt_cfg["batch_size"])
-    train_loader = DataLoader(train_ds, batch_size=min(batch_size, max(1, len(train_ds))), shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=min(batch_size, max(1, len(val_ds))), shuffle=False, num_workers=0)
-    test_loader = DataLoader(test_ds, batch_size=min(batch_size, max(1, len(test_ds))), shuffle=False, num_workers=0)
+    train_loader = make_dataloader(
+        train_ds,
+        batch_size=min(batch_size, max(1, len(train_ds))),
+        shuffle=True,
+        device=device,
+        config=config,
+    )
+    val_loader = make_dataloader(
+        val_ds,
+        batch_size=min(batch_size, max(1, len(val_ds))),
+        shuffle=False,
+        device=device,
+        config=config,
+    )
+    test_loader = make_dataloader(
+        test_ds,
+        batch_size=min(batch_size, max(1, len(test_ds))),
+        shuffle=False,
+        device=device,
+        config=config,
+    )
 
     epochs = int(max_epochs if max_epochs is not None else opt_cfg["epochs"])
     patience = int(config["semantic_actor"]["early_stopping"]["patience"])
@@ -123,27 +219,55 @@ def train_semantic_actor(
         actor.train()
         train_loss = 0.0
         n_batches = 0
-        for batch in tqdm(train_loader, desc=f"actor seed {seed} epoch {epoch}", leave=False):
-            emb = batch["embedding"].to(device)
-            target = batch["command_norm"].to(device)
-            pred = actor(emb)
-            loss = criterion(pred, target)
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
-            train_loss += float(loss.item())
-            n_batches += 1
+        watchdog.begin_epoch(epoch, len(train_loader))
+        prefetcher = CUDAPrefetcher(train_loader, device)
+        try:
+            for batch in tqdm(
+                prefetcher,
+                desc=f"actor seed {seed} epoch {epoch}",
+                leave=False,
+                total=len(train_loader),
+                mininterval=1.0,
+            ):
+                watchdog.touch(micro=n_batches + 1, stage="train")
+                try:
+                    emb = batch["embedding"]
+                    target = batch["command_norm"]
+                    pred = actor(emb)
+                    loss = criterion(pred, target)
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    optimizer.step()
+                    step_loss = float(loss.detach().item())
+                except Exception as exc:
+                    reraise_cuda_context(
+                        exc,
+                        where=f"actor epoch {epoch} batch={n_batches}",
+                        device=device,
+                    )
+                train_loss += step_loss
+                n_batches += 1
+                watchdog.touch(micro=n_batches, effective_step=n_batches, loss=step_loss)
+        except DataLoaderStallError:
+            watchdog.log(f"DataLoader stall at actor epoch={epoch} batch={n_batches}")
+            raise
         train_loss /= max(1, n_batches)
 
-        val_loss = evaluate_mse(actor, val_loader, device, criterion)
+        watchdog.set_stage("validate")
+        try:
+            val_loss = evaluate_mse(actor, val_loader, device, criterion)
+        except Exception as exc:
+            reraise_cuda_context(exc, where=f"actor epoch {epoch} validation", device=device)
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
+        watchdog.log(f"epoch={epoch} train_loss={train_loss:.6f} val_loss={val_loss:.6f}")
 
         if val_loss < best_val:
             best_val = val_loss
-            best_state = copy.deepcopy(actor.state_dict())
+            best_state = state_dict_to_cpu(actor.state_dict())
             best_epoch = epoch
             stale = 0
-            torch.save(
+            save_checkpoint(
+                runs / "best.pt",
                 {
                     "actor": best_state,
                     "jepa_checkpoint": str(ckpt_path),
@@ -153,18 +277,37 @@ def train_semantic_actor(
                     "seed": seed,
                     "selection_split": "actor_train_holdout_validation",
                 },
-                runs / "best.pt",
             )
+            watchdog.log(f"saved best.pt epoch={epoch} val_loss={best_val:.6f}")
         else:
             stale += 1
 
         if config["semantic_actor"]["early_stopping"]["enabled"] and stale >= patience:
+            watchdog.log(f"early stop epoch={epoch} stale={stale}")
             break
 
     if best_state is not None:
         actor.load_state_dict(best_state)
 
-    test_loss = evaluate_mse(actor, test_loader, device, criterion)
+    watchdog.set_stage("test")
+    try:
+        test_loss = evaluate_mse(actor, test_loader, device, criterion)
+    except Exception as exc:
+        reraise_cuda_context(exc, where="actor untouched test", device=device)
+    save_checkpoint(
+        runs / "last.pt",
+        {
+            "actor": state_dict_to_cpu(actor.state_dict()),
+            "jepa_checkpoint": str(ckpt_path),
+            "normalizer": normalizer.to_dict(),
+            "config": config,
+            "val_loss": best_val,
+            "test_loss": test_loss,
+            "seed": seed,
+            "history": history,
+            "selection_split": "actor_train_holdout_validation",
+        },
+    )
     with (runs / "metrics.json").open("w", encoding="utf-8") as handle:
         json.dump(
             {
@@ -198,9 +341,15 @@ def train_semantic_actor_repetitions(
     """Paper protocol: repeat actor training, select best validation run."""
     reps = int(config["evaluation"]["repetitions"])
     seeds = list(config["evaluation"].get("seeds", list(range(reps))))[:reps]
-    root_runs = project_root(config) / config["paths"]["runs_root"] / "semantic_actor"
+    root_runs = project_root(config) / config["paths"]["runs_root"] / actor_run_dirname(config)
     root_runs.mkdir(parents=True, exist_ok=True)
-    ckpt_path = jepa_checkpoint or (project_root(config) / config["paths"]["runs_root"] / "ts_jepa" / "best.pt")
+    if jepa_checkpoint is not None:
+        ckpt_path = Path(jepa_checkpoint)
+    else:
+        ckpt_path = resolve_run_checkpoint(
+            project_root(config) / config["paths"]["runs_root"],
+            jepa_run_dirname(config),
+        )
 
     seed_results = []
     for seed in seeds:

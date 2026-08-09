@@ -24,11 +24,16 @@ Do not treat these as paper facts.
 | Choice | Value | Notes |
 |--------|-------|-------|
 | Method | discretized discounted value iteration + local action refinement | paper requires nonlinear DP; grids/`R` unspecified |
+| Physics `dt` | `0.001` s | matches simulation sampling |
+| DP substeps `N` | `50` | one Bellman transition = **0.05 s** held force |
+| Stage cost | `Σ_{j=1..N} ½‖s_j−s★‖² + ½ R u²` | integrated state cost; control charged **once** per DP decision |
 | Control effort weight `R` | `0.001` | scalar stand-in for positive-definite `R` |
+| Init state noise | `±0.35` (±0.175 on θ) | IC — wide enough to leave π≈0 deadzone under Ns=0 |
 | Discount | `0.99` | unspecified |
-| Value-iteration iters | `25` | unspecified |
+| Value-iteration iters | `50` | unspecified |
 | Force bins | `11` in `[-20,20]` | unspecified discretization |
-| State grids | see `configs/ts_jepa_baseline.yaml` | unspecified |
+| State grids | `x×13`, `ẋ×11`, `θ×13`, `θ̇×11` (see YAML) | unspecified |
+| `act()` | same N-step Bellman cost as VI | local discrete re-opt over table ± neighbors |
 
 ## Input tensor construction
 
@@ -61,6 +66,32 @@ Do not treat these as paper facts.
 |--------|-------|
 | Network output | linear (normalized command domain) |
 | Runtime | `u = u_norm * σ + μ`, then clip to `[-20, +20]` N |
+
+## Training batching / GPU memory
+
+| Choice | Value | Notes |
+|--------|-------|-------|
+| Effective JEPA batch | `256` | paper-specified; one `optimizer.step()` / EMA update per 256 samples |
+| Microbatch size | `16` (default IC) | forward/backward chunk size for 8 GB GPUs; try `32` if VRAM allows |
+| Accumulation | `batch_size / microbatch_size` | loss scaled by `1/accumulation` so grads match mean over 256 |
+| Leftover micros | dropped | e.g. 956 micros → 59×16 used, 12 leftover never `optimizer.step()` |
+| Target-encoder chunking | `256` frames | eval/no-grad; BN running stats; does not change outputs |
+| BatchNorm | unchanged ResNet BN | BN stats still update on microbatches in train mode (no SyncBN / GhostBN) |
+
+## Laptop runtime (Windows + RTX 5070 8 GB)
+
+| Choice | Value | Notes |
+|--------|-------|-------|
+| DataLoader `num_workers` | `4` on CUDA, `0` on CPU | overlaps aug/preprocess with GPU; CPU/tests stay single-process |
+| `pin_memory` + CUDA prefetch | on | hides H2D copy latency |
+| `dataloader_timeout_s` | `120` | PyTorch worker queue timeout; raises instead of silent mid-epoch hang |
+| `heartbeat_s` / `stall_timeout_s` | `30` / `180` | stdout + `runs/*/train.log` heartbeats; STALL lines when progress stops |
+| `cudnn.benchmark` | on | fixed 64×128 shapes |
+| Checkpoint I/O | CPU `state_dict` + `cuda.synchronize` before `torch.save` | mitigates WDDM access-violation crashes mid-epoch |
+| Loss `.item()` | once per effective step | avoids forcing a GPU sync every microbatch |
+| Eval artifacts | `runs/eval/{baseline,nmae,closed_loop,wireless}_report.json` + PNG plots | from `scripts/eval_runtime.py` |
+| Checkpoint resolve | `best.pt` else `seed_0/best.pt` | single-seed prelim vs 5-seed selected `best.pt` |
+| Experiment overlay | `configs/ts_jepa_dp_fixed.yaml` | `_base` merge; `data_dp_fixed` + `ts_jepa_dp_fixed` / `semantic_actor_dp_fixed` run dirs |
 
 ## Validation / early stopping / repetitions
 

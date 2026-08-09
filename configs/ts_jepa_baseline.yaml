@@ -10,6 +10,17 @@ paths:
   data_root: data
   runs_root: runs
 
+# Laptop runtime (IMPLEMENTATION CHOICE — not paper hyperparameters)
+runtime:
+  num_workers: 4          # 0 on CPU/tests; CUDA default feeds GPU on i7+32GB
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  cudnn_benchmark: true
+  dataloader_timeout_s: 120   # IC — raise instead of hanging forever on dead workers
+  heartbeat_s: 30             # IC — progress / STALL lines to stdout + runs/*/train.log
+  stall_timeout_s: 180        # IC — emit STALL if no microbatch progress this long
+
 simulation:
   environment: inverted_cart_pole
   state_representation: RGB
@@ -20,6 +31,7 @@ simulation:
   control_max_N: 20.0
   process_noise_std: 0.0  # Ns=0 deterministic baseline (IC)
   desired_state: [0.0, 0.0, 0.0, 0.0]  # IC
+  init_noise: 0.35  # IC — wide enough that DP policy is exercised (not only π=0 deadzone)
   render_height: 96  # IC — not a paper-required camera resolution
   render_width: 192  # IC
   position_tol: 0.05
@@ -37,12 +49,13 @@ control_teacher:  # method PAPER-SPECIFIED; numeric grids PAPER-SILENT → IC
   force_bins: 11
   control_effort_weight: 0.001
   discount: 0.99
-  value_iteration_iters: 25
+  value_iteration_iters: 50  # IC
+  dp_substeps: 50  # IC — N physics steps per DP transition (0.05 s at dt=0.001)
   grid:
-    x: [-1.2, 1.2, 9]
-    x_dot: [-2.5, 2.5, 7]
-    theta: [-0.35, 0.35, 9]
-    theta_dot: [-3.0, 3.0, 7]
+    x: [-1.2, 1.2, 13]
+    x_dot: [-2.5, 2.5, 11]
+    theta: [-0.35, 0.35, 13]
+    theta_dot: [-3.0, 3.0, 11]
 
 input:
   channels_per_rgb_frame: 3
@@ -84,7 +97,8 @@ ts_jepa:
   optimizer:
     type: SGD
     learning_rate: 0.2
-    batch_size: 256
+    batch_size: 256  # paper effective batch; gradients accumulated to this size
+    microbatch_size: 16  # IC — GPU memory; accumulation = batch_size / microbatch_size
     epochs: 150
     weight_decay: 0.0004
   lr_decay:

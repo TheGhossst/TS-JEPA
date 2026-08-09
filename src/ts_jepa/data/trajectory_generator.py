@@ -31,6 +31,7 @@ def build_env_and_teacher(config: dict[str, Any]) -> tuple[InvertedCartPoleEnv, 
         desired_state=sim["desired_state"],
         params=params,
         process_noise_std=float(sim.get("process_noise_std", 0.0)),
+        init_noise=float(sim.get("init_noise", 0.05)),
     )
     teacher = DPControlTeacher(
         env=env,
@@ -42,6 +43,7 @@ def build_env_and_teacher(config: dict[str, Any]) -> tuple[InvertedCartPoleEnv, 
         discount=teacher_cfg["discount"],
         value_iteration_iters=teacher_cfg["value_iteration_iters"],
         desired_state=sim["desired_state"],
+        dp_substeps=int(teacher_cfg.get("dp_substeps", 50)),
     )
     return env, teacher
 
