@@ -10,6 +10,7 @@ import numpy as np
 
 from ts_jepa.config import project_root
 from ts_jepa.data.datasets import fit_command_normalizer
+from ts_jepa.env.sampling import resolve_observation_cadence_from_config
 from ts_jepa.preprocessing.command_stats import CommandNormalizer
 
 
@@ -120,10 +121,14 @@ def sanity_check_trajectory_root(
     Does not regenerate data. Optionally fits command_norm.json under this root only.
     """
     root = Path(data_root)
-    steps = int(config["simulation"]["trajectory_steps"])
+    cadence = resolve_observation_cadence_from_config(config, allow_truncated_budget=False)
+    observations_per_trajectory = int(cadence["num_observations"])
     report: dict[str, Any] = {
         "data_root": str(root),
-        "trajectory_steps": steps,
+        "trajectory_steps_physics_budget": int(config["simulation"]["trajectory_steps"]),
+        "observations_per_trajectory": observations_per_trajectory,
+        "sampling_interval_ms": int(cadence["sampling_interval_ms"]),
+        "observation_stride": int(cadence["observation_stride"]),
         "init_noise": float(config["simulation"]["init_noise"]),
         "splits": {},
         "id_overlap": {},
@@ -135,7 +140,11 @@ def sanity_check_trajectory_root(
         expected = int(config[cfg_key]["dataset"][count_key])
         split_dir = root / "trajectories" / family / split
         key = f"{family}_{split}"
-        report["splits"][key] = inspect_split(split_dir, expected_count=expected, expected_steps=steps)
+        report["splits"][key] = inspect_split(
+            split_dir,
+            expected_count=expected,
+            expected_steps=observations_per_trajectory,
+        )
 
     # Train/test ID separation within each family (paper protocol).
     for family in ("jepa", "actor"):

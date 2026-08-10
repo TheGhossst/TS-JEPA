@@ -73,7 +73,7 @@ def main() -> None:
     z = model.encode_context(context)
     with torch.no_grad():
         zt = model.encode_targets(future)
-    zp = model.predict(z, cmds)
+    zp = model.predict(z)
     loss = cosine_alignment_loss(zp, zt)
     opt.zero_grad(set_to_none=True)
     loss.backward()
@@ -101,7 +101,7 @@ def main() -> None:
         z = model.encode_context(context)
         with torch.no_grad():
             zt = model.encode_targets(future)
-        zp = model.predict(z, cmds)
+        zp = model.predict(z)
         loss = cosine_alignment_loss(zp, zt)
         opt.zero_grad(set_to_none=True)
         loss.backward()

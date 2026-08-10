@@ -15,7 +15,12 @@ from ts_jepa.config import (
     project_root,
 )
 from ts_jepa.device import describe_device, select_device
-from ts_jepa.training.train_actor import train_semantic_actor, train_semantic_actor_repetitions
+from ts_jepa.training.train_actor import (
+    VALID_ACTOR_INPUT_MODES,
+    _actor_runs_dirname,
+    train_semantic_actor,
+    train_semantic_actor_repetitions,
+)
 
 
 def main() -> None:
@@ -42,6 +47,16 @@ def main() -> None:
         default=None,
         help="Override config paths.runs_root.",
     )
+    parser.add_argument(
+        "--input",
+        type=str,
+        default="embedding",
+        choices=list(VALID_ACTOR_INPUT_MODES),
+        help=(
+            "Actor input features: 'embedding' = frozen JEPA z (default); "
+            "'state' = κ-window raw physical state (bypasses JEPA encoder)."
+        ),
+    )
     args = parser.parse_args()
     config = load_config(args.config)
     apply_cli_path_overrides(config, data_root=args.data_root, runs_root=args.runs_root)
@@ -49,11 +64,15 @@ def main() -> None:
     print(describe_device(device))
     print(
         {
+            "input_mode": args.input,
             "data_root": str(project_root(config) / config["paths"]["data_root"]),
             "actor_runs": str(
-                project_root(config) / config["paths"]["runs_root"] / actor_run_dirname(config)
+                project_root(config)
+                / config["paths"]["runs_root"]
+                / _actor_runs_dirname(config, args.input)
             ),
             "default_jepa_family": jepa_run_dirname(config),
+            "default_actor_family": actor_run_dirname(config),
         }
     )
     ckpt = Path(args.jepa_checkpoint) if args.jepa_checkpoint else None
@@ -64,6 +83,7 @@ def main() -> None:
             device=device,
             max_epochs=args.epochs,
             seed=args.single_seed,
+            input_mode=args.input,
         )
     else:
         result = train_semantic_actor_repetitions(
@@ -71,6 +91,7 @@ def main() -> None:
             jepa_checkpoint=ckpt,
             device=device,
             max_epochs=args.epochs,
+            input_mode=args.input,
         )
     print(json.dumps(result, indent=2, default=str))
 

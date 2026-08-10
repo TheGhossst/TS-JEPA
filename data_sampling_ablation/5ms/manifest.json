@@ -1,0 +1,158 @@
+{
+  "sampling_interval_ms": 5,
+  "dt_s": 0.001,
+  "observation_stride_physics_steps": 5,
+  "physics_budget_steps": 100,
+  "physics_budget_effective_steps": 100,
+  "budget_truncated": false,
+  "physical_duration_s": 0.1,
+  "num_observations_per_trajectory": 20,
+  "num_trajectories": 20,
+  "render_height": 96,
+  "render_width": 192,
+  "dp_substeps": 50,
+  "ode_dt_unchanged": true,
+  "teacher_unchanged": true,
+  "trajectories": [
+    {
+      "trajectory_index": 0,
+      "seed": 10000,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00000.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    },
+    {
+      "trajectory_index": 1,
+      "seed": 10001,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00001.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    },
+    {
+      "trajectory_index": 2,
+      "seed": 10002,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00002.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    },
+    {
+      "trajectory_index": 3,
+      "seed": 10003,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00003.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    },
+    {
+      "trajectory_index": 4,
+      "seed": 10004,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00004.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    },
+    {
+      "trajectory_index": 5,
+      "seed": 10005,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00005.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    },
+    {
+      "trajectory_index": 6,
+      "seed": 10006,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00006.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    },
+    {
+      "trajectory_index": 7,
+      "seed": 10007,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00007.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    },
+    {
+      "trajectory_index": 8,
+      "seed": 10008,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00008.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    },
+    {
+      "trajectory_index": 9,
+      "seed": 10009,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00009.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    },
+    {
+      "trajectory_index": 10,
+      "seed": 10010,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00010.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    },
+    {
+      "trajectory_index": 11,
+      "seed": 10011,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00011.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    },
+    {
+      "trajectory_index": 12,
+      "seed": 10012,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00012.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    },
+    {
+      "trajectory_index": 13,
+      "seed": 10013,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00013.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    },
+    {
+      "trajectory_index": 14,
+      "seed": 10014,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00014.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    },
+    {
+      "trajectory_index": 15,
+      "seed": 10015,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00015.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    },
+    {
+      "trajectory_index": 16,
+      "seed": 10016,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00016.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    },
+    {
+      "trajectory_index": 17,
+      "seed": 10017,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00017.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    },
+    {
+      "trajectory_index": 18,
+      "seed": 10018,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00018.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    },
+    {
+      "trajectory_index": 19,
+      "seed": 10019,
+      "path": "C:\\code\\TS-JEPA\\data_sampling_ablation\\5ms\\trajectories\\00019.npz",
+      "num_observations": 20,
+      "physics_steps_total": 100
+    }
+  ]
+}

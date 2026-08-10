@@ -71,19 +71,49 @@ class InvertedCartPoleEnv:
         theta_ok = abs(float(s[2])) <= angle_tol
         return int(x_ok and theta_ok)
 
-    def rollout(self, teacher: ControlPolicy, steps: int, seed: int) -> dict[str, np.ndarray]:
+    def rollout(
+        self,
+        teacher: ControlPolicy,
+        steps: int,
+        seed: int,
+        observation_stride: int = 1,
+    ) -> dict[str, np.ndarray]:
+        """
+        Roll out teacher policy and store RGB / command / state at observation times.
+
+        `observation_stride` is the number of ODE steps between stored observations.
+        Force is held constant across the stride (teacher queried only at observation times).
+        Default stride=1 preserves the historical 1-obs-per-physics-step behavior.
+        ODE dt is unchanged.
+        """
+        stride = int(observation_stride)
+        if stride < 1:
+            raise ValueError(f"observation_stride must be >= 1, got {stride}")
+
         state = self.reset(seed=seed)
         frames = []
         commands = []
         states = []
-        for _ in range(steps):
+        observation_indices = []
+        timestamps_s = []
+        physics_step = 0
+        for obs_i in range(int(steps)):
             force = self.clip_force(float(teacher.act(state)))
             frames.append(self.render(state))
             commands.append(force)
             states.append(state.copy())
-            state, _ = self.step(force)
+            observation_indices.append(obs_i)
+            timestamps_s.append(physics_step * float(self.ode.dt))
+            for _ in range(stride):
+                state = self.ode.step(state, force, process_noise_std=self.process_noise_std)
+                physics_step += 1
+            self.state = state
         return {
             "frames": np.stack(frames, axis=0).astype(np.uint8),
             "commands": np.asarray(commands, dtype=np.float32),
             "states": np.stack(states, axis=0).astype(np.float64),
+            "observation_indices": np.asarray(observation_indices, dtype=np.int64),
+            "timestamps_s": np.asarray(timestamps_s, dtype=np.float64),
+            "observation_stride": np.asarray(stride, dtype=np.int64),
+            "physics_steps_total": np.asarray(physics_step, dtype=np.int64),
         }

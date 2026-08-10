@@ -1,0 +1,13 @@
+# Experiment overlay: diagnostic / future training data at 5 ms observation cadence.
+# ODE dt stays 1 ms; observation_stride=5 at generation time (see generate_sampling_ablation.py).
+# Does NOT modify paper-faithful baseline config or data/.
+_base: ts_jepa_baseline.yaml
+
+simulation:
+  sampling_interval_ms: 5  # documentation + future wiring; ablation scripts pass stride explicitly
+
+paths:
+  data_root: data_sampling_5ms
+  runs_root: runs
+  ts_jepa_dirname: ts_jepa_sampling_5ms
+  semantic_actor_dirname: semantic_actor_sampling_5ms

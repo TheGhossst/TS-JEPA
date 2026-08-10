@@ -123,10 +123,9 @@ def evaluate_prediction_horizon_nmae(
 
     for batch in loader:
         context = batch["context"].to(device)
-        teacher_norm = batch["teacher_commands_norm"].to(device)
         teacher_phys = batch["teacher_commands"].cpu().numpy()
         z = jepa.encode_context(context)
-        z_pred = jepa.predict(z, teacher_norm)  # [B, Kp, D]
+        z_pred = jepa.predict(z)  # [B, Kp, D]
         b = z_pred.shape[0]
         u_norm = actor(z_pred.reshape(b * kp, -1)).reshape(b, kp)
         u_phys = normalizer.denormalize(u_norm.cpu().numpy())
@@ -156,7 +155,7 @@ def evaluate_prediction_horizon_nmae(
         "kp": kp,
         "split": "jepa_test_untouched",
         "num_values": int(pred.size),
-        "conditioning": "trajectory_teacher_commands",
+        "conditioning": "embedding_only_predictor",
     }
 
 

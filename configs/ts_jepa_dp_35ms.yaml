@@ -1,0 +1,29 @@
+# 35 ms observation-cadence experiment (extended 700 ms trajectories, 20 observations).
+# Inherits all paper-faithful model/hparams from ts_jepa_baseline.yaml.
+# Does NOT overwrite data/, data_dp_fixed/, or existing runs.
+#
+# JEPA trajectory counts are 3.5x paper-faithful (700/140 vs 200/40) to offset the
+# 17x-per-trajectory reduction in JEPA training windows (5 vs 85 at Kp=15).
+# Actor counts remain paper-faithful (100/20).
+_base: ts_jepa_baseline.yaml
+
+simulation:
+  sampling_interval_ms: 35
+  trajectory_steps: 700  # physics-step budget; 700 * 0.001 s = 700 ms
+  # observations_per_trajectory: 20  (derived: 700 / 35 ms stride)
+
+paths:
+  data_root: data_dp_35ms
+  runs_root: runs
+  ts_jepa_dirname: ts_jepa_dp_35ms
+  semantic_actor_dirname: semantic_actor_dp_35ms
+
+ts_jepa:
+  dataset:
+    train_trajectories: 700
+    test_trajectories: 140
+
+semantic_actor:
+  dataset:
+    train_trajectories: 100
+    test_trajectories: 20

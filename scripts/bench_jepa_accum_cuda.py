@@ -42,7 +42,7 @@ def run_effective_step(
         z = model.encode_context(context)
         with torch.no_grad():
             zt = model.encode_targets(future)
-        zp = model.predict(z, cmds)
+        zp = model.predict(z)
         loss = cosine_alignment_loss(zp, zt)
         (loss / accum_steps).backward()
         group_loss += float(loss.detach().cpu())

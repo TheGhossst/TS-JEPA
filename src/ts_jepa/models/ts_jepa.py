@@ -20,16 +20,18 @@ class TSJEPA(nn.Module):
         pred_cfg = config["ts_jepa"]["predictor"]
         in_channels = int(inp["channels_per_rgb_frame"]) * int(inp["kappa"])
         embedding_dim = int(enc_cfg["embedding_dim"])
+        resize_hw = tuple(inp["resize"])
+        input_hw = (int(resize_hw[0]), int(resize_hw[1]))
         self.context_encoder = ContextEncoder(
             in_channels=in_channels,
             widths=list(enc_cfg["widths"]),
             embedding_dim=embedding_dim,
             blocks_per_stage=int(enc_cfg.get("blocks_per_stage", 2)),
+            input_hw=input_hw,
         )
         self.target_encoder = clone_encoder(self.context_encoder)
         self.predictor = Predictor(
             embedding_dim=embedding_dim,
-            command_dim=1,
             hidden_dim=int(pred_cfg["hidden_dim"]),
         )
         self.ema_decay = float(config["ts_jepa"]["target_encoder"]["ema_decay"])
@@ -55,8 +57,8 @@ class TSJEPA(nn.Module):
         emb = torch.cat(chunks, dim=0)
         return emb.view(b, kp, -1)
 
-    def predict(self, embedding: torch.Tensor, commands_norm: torch.Tensor) -> torch.Tensor:
-        return self.predictor(embedding, commands_norm, horizon=self.kp)
+    def predict(self, embedding: torch.Tensor, horizon: int | None = None) -> torch.Tensor:
+        return self.predictor(embedding, horizon=horizon if horizon is not None else self.kp)
 
     def ema_step(self) -> None:
         ema_update(self.target_encoder, self.context_encoder, decay=self.ema_decay)

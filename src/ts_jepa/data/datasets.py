@@ -92,6 +92,22 @@ class TrajectoryDataset(Dataset):
         }
 
 
+def assemble_state_context(states: np.ndarray, time_index: int, kappa: int) -> np.ndarray:
+    """
+    κ-length raw-state window ending at time_index (same framing as assemble_context).
+
+    states: [T, S] physical state (x, x_dot, theta, theta_dot).
+    Returns flattened float32 vector of shape [kappa * S], left-padded by repeating
+    the first available state when time_index < kappa - 1.
+    """
+    k = int(kappa)
+    start = max(0, int(time_index) - k + 1)
+    selected = [states[t] for t in range(start, int(time_index) + 1)]
+    while len(selected) < k:
+        selected.insert(0, selected[0])
+    return np.concatenate(selected, axis=0).astype(np.float32)
+
+
 class ActorEmbeddingDataset(Dataset):
     """Pairs of encoder embeddings and normalized control commands."""
 
@@ -111,6 +127,7 @@ class ActorEmbeddingDataset(Dataset):
         self.kappa = int(config["input"]["kappa"])
         self.files = sorted(self.trajectory_dir.glob("*.npz"))
         self.samples: list[tuple[torch.Tensor, float]] = []
+        self.feature_dim: int | None = None
 
         encoder.eval()
         with torch.no_grad():
@@ -131,6 +148,8 @@ class ActorEmbeddingDataset(Dataset):
                 for start in range(0, len(batch_contexts), bs):
                     chunk = torch.stack(batch_contexts[start : start + bs], dim=0).to(device)
                     emb = encoder(chunk).cpu()
+                    if self.feature_dim is None:
+                        self.feature_dim = int(emb.shape[-1])
                     for i in range(emb.shape[0]):
                         self.samples.append((emb[i], batch_cmds[start + i]))
 
@@ -141,6 +160,66 @@ class ActorEmbeddingDataset(Dataset):
         embedding, command_norm = self.samples[index]
         return {
             "embedding": embedding,
+            "command_norm": torch.tensor([command_norm], dtype=torch.float32),
+        }
+
+
+class ActorStateDataset(Dataset):
+    """
+    Pairs of κ-window raw physical state features and normalized control commands.
+
+    Same trajectory / time_index / command pairing as ActorEmbeddingDataset, but
+    bypasses the JEPA encoder: actor input is flatten([s_{t-κ+1}, ..., s_t]).
+    Dict keys match ActorEmbeddingDataset so the training loop is unchanged.
+    """
+
+    def __init__(
+        self,
+        trajectory_dir: Path,
+        config: dict[str, Any],
+        normalizer: CommandNormalizer,
+        training: bool = True,
+    ) -> None:
+        self.trajectory_dir = Path(trajectory_dir)
+        self.config = config
+        self.normalizer = normalizer
+        self.training = training
+        self.kappa = int(config["input"]["kappa"])
+        self.files = sorted(self.trajectory_dir.glob("*.npz"))
+        self.samples: list[tuple[torch.Tensor, float]] = []
+        self.feature_dim: int | None = None
+        self.state_dim: int | None = None
+
+        for file_path in self.files:
+            with np.load(file_path) as data:
+                states = np.asarray(data["states"], dtype=np.float32)
+                commands = np.asarray(data["commands"], dtype=np.float32)
+            if states.ndim != 2:
+                raise ValueError(f"Expected states [T, S] in {file_path}, got shape {states.shape}")
+            if self.state_dim is None:
+                self.state_dim = int(states.shape[1])
+                self.feature_dim = int(self.kappa * self.state_dim)
+            elif int(states.shape[1]) != self.state_dim:
+                raise ValueError(
+                    f"Inconsistent state dim in {file_path}: {states.shape[1]} vs {self.state_dim}"
+                )
+            for time_index in range(len(commands)):
+                features = assemble_state_context(states, time_index, self.kappa)
+                cmd_norm = float(
+                    self.normalizer.normalize(np.array([commands[time_index]], dtype=np.float32))[0]
+                )
+                self.samples.append((torch.from_numpy(features.copy()), cmd_norm))
+
+        if self.feature_dim is None:
+            raise ValueError(f"No trajectory files found under {self.trajectory_dir}")
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        features, command_norm = self.samples[index]
+        return {
+            "embedding": features,
             "command_norm": torch.tensor([command_norm], dtype=torch.float32),
         }
 

@@ -117,8 +117,7 @@ class FrozenRuntimeController:
     def step_packet_lost(self) -> float:
         if self.latent is None:
             return 0.0
-        cmd = torch.tensor([[self.last_command_norm]], dtype=torch.float32, device=self.device)
-        z_next = self.jepa.predictor.forward_step(self.latent, cmd)
+        z_next = self.jepa.predictor.forward_step(self.latent)
         u_norm = self.actor(z_next)
         force = self.stats.denormalize_and_clip(u_norm)
         self.latent = z_next

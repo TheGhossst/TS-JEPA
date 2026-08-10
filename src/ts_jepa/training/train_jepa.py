@@ -106,11 +106,9 @@ def evaluate_cosine_loss(
         for batch in CUDAPrefetcher(loader, device):
             context = batch["context"]
             future = batch["future_frames"]
-            # Teacher/trajectory control sequence (not Semantic Actor predictions).
-            teacher_commands_norm = batch["teacher_commands_norm"]
             z = model.encode_context(context)
             z_tgt = model.encode_targets(future)
-            z_pred = model.predict(z, teacher_commands_norm)
+            z_pred = model.predict(z)
             total += float(cosine_alignment_loss(z_pred, z_tgt).item())
             n_batches += 1
     except DataLoaderStallError:
@@ -133,7 +131,7 @@ def train_ts_jepa(
 
     Model selection uses validation carved from the train split only.
     The untouched JEPA test set is evaluated after training and never used for selection.
-    Predictor conditioning uses the trajectory/teacher control sequence.
+    Predictor is embedding-only (no teacher-command conditioning).
     """
     device = select_device(device)
     _set_seed(seed)
@@ -297,12 +295,10 @@ def _train_ts_jepa_body(
                 try:
                     context = batch["context"]
                     future = batch["future_frames"]
-                    teacher_commands_norm = batch["teacher_commands_norm"]
-
                     z = model.encode_context(context)
                     with torch.no_grad():
                         z_tgt = model.encode_targets(future)
-                    z_pred = model.predict(z, teacher_commands_norm)
+                    z_pred = model.predict(z)
                     loss = cosine_alignment_loss(z_pred, z_tgt)
                     # Scale so accumulated grads match mean loss over the effective batch.
                     watchdog.touch(micro=micros_seen, stage="backward")

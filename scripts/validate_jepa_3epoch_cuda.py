@@ -314,7 +314,7 @@ def train_one_epoch(
             f"stage | epoch={epoch} step={next_step_idx}/{total_effective} "
             f"micro={next_micro_idx}/{accum_steps} op=predictor start"
         )
-        zp = model.predict(z, cmds)
+        zp = model.predict(z)
         loss = cosine_alignment_loss(zp, zt)
 
         progress.set_stage("backward")

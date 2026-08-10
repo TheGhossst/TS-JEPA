@@ -15,10 +15,9 @@ def test_model_forward_shapes_and_loss():
     b, kp = 2, config["ts_jepa"]["prediction_horizon"]["Kp"]
     context = torch.randn(b, 6, 64, 128)
     future = torch.randn(b, kp, 6, 64, 128)
-    commands = torch.randn(b, kp)
     z = model.encode_context(context)
     z_tgt = model.encode_targets(future)
-    z_pred = model.predict(z, commands)
+    z_pred = model.predict(z)
     loss = cosine_alignment_loss(z_pred, z_tgt)
     assert z.shape == (b, 256)
     assert z_tgt.shape == (b, kp, 256)

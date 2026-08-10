@@ -7,11 +7,11 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import Subset
+from torch.utils.data import Dataset, Subset
 from tqdm import tqdm
 
 from ts_jepa.config import actor_run_dirname, jepa_run_dirname, project_root
-from ts_jepa.data.datasets import ActorEmbeddingDataset, load_command_normalizer
+from ts_jepa.data.datasets import ActorEmbeddingDataset, ActorStateDataset, load_command_normalizer
 from ts_jepa.device import select_device
 from ts_jepa.evaluation.checkpoints import resolve_run_checkpoint
 from ts_jepa.models.actor import SemanticActor
@@ -30,6 +30,8 @@ from ts_jepa.runtime import (
     state_dict_to_cpu,
 )
 
+VALID_ACTOR_INPUT_MODES = ("embedding", "state")
+
 
 def _set_seed(seed: int) -> None:
     np.random.seed(seed)
@@ -38,7 +40,24 @@ def _set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def _split_train_val_actor(dataset: ActorEmbeddingDataset, val_fraction: float) -> tuple[Subset, Subset]:
+def _validate_input_mode(input_mode: str) -> str:
+    mode = str(input_mode).strip().lower()
+    if mode not in VALID_ACTOR_INPUT_MODES:
+        raise ValueError(
+            f"Unsupported actor input_mode={input_mode!r}; expected one of {VALID_ACTOR_INPUT_MODES}"
+        )
+    return mode
+
+
+def _actor_runs_dirname(config: dict[str, Any], input_mode: str) -> str:
+    """Keep embedding runs at the default path; isolate state runs with a suffix."""
+    base = actor_run_dirname(config)
+    if input_mode == "embedding":
+        return base
+    return f"{base}_{input_mode}"
+
+
+def _split_train_val_actor(dataset: Dataset, val_fraction: float) -> tuple[Subset, Subset]:
     """
     Hold out a fraction of the actor TRAIN embeddings for early stopping.
 
@@ -81,13 +100,19 @@ def train_semantic_actor(
     data_root: Path | None = None,
     seed: int = 0,
     run_dir: Path | None = None,
+    input_mode: str = "embedding",
 ) -> dict[str, Any]:
     """
     Train one semantic-actor seed.
 
     Early stopping / checkpoint selection uses a holdout from actor train only.
     Untouched actor test trajectories are evaluated after training only.
+
+    input_mode:
+      - "embedding" (default): frozen JEPA context_encoder embeddings
+      - "state": κ-window raw physical state features (bypasses JEPA encoder)
     """
+    input_mode = _validate_input_mode(input_mode)
     device = select_device(device)
     _set_seed(seed)
     configure_train_logging()
@@ -101,19 +126,19 @@ def train_semantic_actor(
     runs = run_dir or (
         project_root(config)
         / config["paths"]["runs_root"]
-        / actor_run_dirname(config)
+        / _actor_runs_dirname(config, input_mode)
         / f"seed_{seed}"
     )
     runs.mkdir(parents=True, exist_ok=True)
     runtime_cfg = config.get("runtime", {})
     watchdog = TrainProgressWatchdog(
         device=device,
-        name=f"actor-seed{seed}",
+        name=f"actor-{input_mode}-seed{seed}",
         log_path=runs / "train.log",
         heartbeat_s=float(runtime_cfg.get("heartbeat_s", 30.0)),
         stall_timeout_s=float(runtime_cfg.get("stall_timeout_s", 180.0)),
     )
-    watchdog.log(f"start device={device} GPU={gpu_mem_str(device)}")
+    watchdog.log(f"start device={device} input_mode={input_mode} GPU={gpu_mem_str(device)}")
 
     try:
         return _train_semantic_actor_body(
@@ -125,6 +150,7 @@ def train_semantic_actor(
             runs=runs,
             jepa_checkpoint=jepa_checkpoint,
             watchdog=watchdog,
+            input_mode=input_mode,
         )
     except Exception as exc:
         watchdog.log(f"FATAL {type(exc).__name__}: {exc}")
@@ -145,27 +171,46 @@ def _train_semantic_actor_body(
     runs: Path,
     jepa_checkpoint: Path | None,
     watchdog: TrainProgressWatchdog,
+    input_mode: str,
 ) -> dict[str, Any]:
     root = data_root
-    if jepa_checkpoint is not None:
-        ckpt_path = Path(jepa_checkpoint)
-    else:
-        ckpt_path = resolve_run_checkpoint(
-            project_root(config) / config["paths"]["runs_root"],
-            jepa_run_dirname(config),
-        )
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    jepa = TSJEPA(config).to(device)
-    jepa.load_state_dict(ckpt["model"])
-    jepa.eval()
-    for p in jepa.parameters():
-        p.requires_grad_(False)
-
     normalizer = load_command_normalizer(config, data_root=root)
     train_dir = root / "trajectories" / "actor" / "train"
     test_dir = root / "trajectories" / "actor" / "test"
-    train_full = ActorEmbeddingDataset(train_dir, config, normalizer, jepa.context_encoder, device, training=True)
-    test_ds = ActorEmbeddingDataset(test_dir, config, normalizer, jepa.context_encoder, device, training=False)
+
+    ckpt_path: Path | None = None
+    if input_mode == "embedding":
+        if jepa_checkpoint is not None:
+            ckpt_path = Path(jepa_checkpoint)
+        else:
+            ckpt_path = resolve_run_checkpoint(
+                project_root(config) / config["paths"]["runs_root"],
+                jepa_run_dirname(config),
+            )
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        jepa = TSJEPA(config).to(device)
+        jepa.load_state_dict(ckpt["model"])
+        jepa.eval()
+        for p in jepa.parameters():
+            p.requires_grad_(False)
+        train_full: Dataset = ActorEmbeddingDataset(
+            train_dir, config, normalizer, jepa.context_encoder, device, training=True
+        )
+        test_ds: Dataset = ActorEmbeddingDataset(
+            test_dir, config, normalizer, jepa.context_encoder, device, training=False
+        )
+        feature_dim = int(
+            getattr(train_full, "feature_dim", None)
+            or config["ts_jepa"]["encoder"]["embedding_dim"]
+        )
+    else:
+        train_full = ActorStateDataset(train_dir, config, normalizer, training=True)
+        test_ds = ActorStateDataset(test_dir, config, normalizer, training=False)
+        feature_dim = int(train_full.feature_dim)  # type: ignore[attr-defined]
+        watchdog.log(
+            f"state features: kappa={config['input']['kappa']} "
+            f"state_dim={train_full.state_dim} feature_dim={feature_dim}"  # type: ignore[attr-defined]
+        )
 
     val_fraction = float(config["semantic_actor"]["early_stopping"].get("val_fraction", 0.2))
     train_ds, val_ds = _split_train_val_actor(train_full, val_fraction)
@@ -173,7 +218,7 @@ def _train_semantic_actor_body(
     opt_cfg = config["semantic_actor"]["optimizer"]
     actor_cfg = config["semantic_actor"]["architecture"]
     actor = SemanticActor(
-        embedding_dim=int(config["ts_jepa"]["encoder"]["embedding_dim"]),
+        embedding_dim=feature_dim,
         hidden_dims=tuple(actor_cfg["hidden_dims"]),
         dropout=float(actor_cfg["dropout"]),
     ).to(device)
@@ -224,7 +269,7 @@ def _train_semantic_actor_body(
         try:
             for batch in tqdm(
                 prefetcher,
-                desc=f"actor seed {seed} epoch {epoch}",
+                desc=f"actor[{input_mode}] seed {seed} epoch {epoch}",
                 leave=False,
                 total=len(train_loader),
                 mininterval=1.0,
@@ -270,11 +315,13 @@ def _train_semantic_actor_body(
                 runs / "best.pt",
                 {
                     "actor": best_state,
-                    "jepa_checkpoint": str(ckpt_path),
+                    "jepa_checkpoint": str(ckpt_path) if ckpt_path is not None else None,
                     "normalizer": normalizer.to_dict(),
                     "config": config,
                     "val_loss": best_val,
                     "seed": seed,
+                    "input_mode": input_mode,
+                    "feature_dim": feature_dim,
                     "selection_split": "actor_train_holdout_validation",
                 },
             )
@@ -298,13 +345,15 @@ def _train_semantic_actor_body(
         runs / "last.pt",
         {
             "actor": state_dict_to_cpu(actor.state_dict()),
-            "jepa_checkpoint": str(ckpt_path),
+            "jepa_checkpoint": str(ckpt_path) if ckpt_path is not None else None,
             "normalizer": normalizer.to_dict(),
             "config": config,
             "val_loss": best_val,
             "test_loss": test_loss,
             "seed": seed,
             "history": history,
+            "input_mode": input_mode,
+            "feature_dim": feature_dim,
             "selection_split": "actor_train_holdout_validation",
         },
     )
@@ -312,6 +361,8 @@ def _train_semantic_actor_body(
         json.dump(
             {
                 "seed": seed,
+                "input_mode": input_mode,
+                "feature_dim": feature_dim,
                 "best_val": best_val,
                 "best_epoch": best_epoch,
                 "test_loss": test_loss,
@@ -327,6 +378,8 @@ def _train_semantic_actor_body(
         "history": history,
         "runs_dir": str(runs),
         "seed": seed,
+        "input_mode": input_mode,
+        "feature_dim": feature_dim,
         "checkpoint": str(runs / "best.pt"),
     }
 
@@ -337,19 +390,26 @@ def train_semantic_actor_repetitions(
     device: torch.device | None = None,
     max_epochs: int | None = None,
     data_root: Path | None = None,
+    input_mode: str = "embedding",
 ) -> dict[str, Any]:
     """Paper protocol: repeat actor training, select best validation run."""
+    input_mode = _validate_input_mode(input_mode)
     reps = int(config["evaluation"]["repetitions"])
     seeds = list(config["evaluation"].get("seeds", list(range(reps))))[:reps]
-    root_runs = project_root(config) / config["paths"]["runs_root"] / actor_run_dirname(config)
+    root_runs = (
+        project_root(config) / config["paths"]["runs_root"] / _actor_runs_dirname(config, input_mode)
+    )
     root_runs.mkdir(parents=True, exist_ok=True)
-    if jepa_checkpoint is not None:
-        ckpt_path = Path(jepa_checkpoint)
+    if input_mode == "embedding":
+        if jepa_checkpoint is not None:
+            ckpt_path: Path | None = Path(jepa_checkpoint)
+        else:
+            ckpt_path = resolve_run_checkpoint(
+                project_root(config) / config["paths"]["runs_root"],
+                jepa_run_dirname(config),
+            )
     else:
-        ckpt_path = resolve_run_checkpoint(
-            project_root(config) / config["paths"]["runs_root"],
-            jepa_run_dirname(config),
-        )
+        ckpt_path = None
 
     seed_results = []
     for seed in seeds:
@@ -361,6 +421,7 @@ def train_semantic_actor_repetitions(
             data_root=data_root,
             seed=int(seed),
             run_dir=root_runs / f"seed_{seed}",
+            input_mode=input_mode,
         )
         seed_results.append(result)
 
@@ -369,14 +430,22 @@ def train_semantic_actor_repetitions(
     selected = torch.load(best_ckpt, map_location="cpu", weights_only=False)
     selected["selected_from_seeds"] = seeds
     selected["selection_criterion"] = "best_validation_mse"
+    selected["input_mode"] = input_mode
     selected["seed_results"] = [
-        {"seed": r["seed"], "best_val": r["best_val"], "test_loss": r["test_loss"], "checkpoint": r["checkpoint"]}
+        {
+            "seed": r["seed"],
+            "best_val": r["best_val"],
+            "test_loss": r["test_loss"],
+            "checkpoint": r["checkpoint"],
+            "input_mode": r["input_mode"],
+        }
         for r in seed_results
     ]
     torch.save(selected, root_runs / "best.pt")
     summary = {
         "repetitions": reps,
         "seeds": seeds,
+        "input_mode": input_mode,
         "selection_criterion": "best_validation_mse",
         "best_seed": best["seed"],
         "best_val": best["best_val"],

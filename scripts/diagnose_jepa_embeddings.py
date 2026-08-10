@@ -276,10 +276,9 @@ def run_diagnostic(
 
     for batch in loader:
         context = batch["context"].to(device)
-        teacher_norm = batch["teacher_commands_norm"].to(device)
         teacher_phys = batch["teacher_commands"][:, 0].cpu().numpy()
         z = jepa.encode_context(context).cpu().numpy()
-        z_pred = jepa.predict(torch.from_numpy(z).to(device), teacher_norm).cpu().numpy()
+        z_pred = jepa.predict(torch.from_numpy(z).to(device)).cpu().numpy()
         b = z.shape[0]
         z_list.append(z)
         z_pred_list.append(z_pred)
