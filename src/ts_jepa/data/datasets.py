@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import Dataset
 
 from ts_jepa.config import project_root
-from ts_jepa.data.temporal_plan import (
+from ts_jepa.data.temporal import (
     command_indices,
     context_frame_indices,
     max_valid_time_index,

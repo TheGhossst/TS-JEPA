@@ -13,7 +13,6 @@ Steps:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 
@@ -23,23 +22,15 @@ from ts_jepa.models.predictor_command_resolution import (
     select_predictor_conditioning_commands,
 )
 from ts_jepa.models.ts_jepa import TSJEPA
+from ts_jepa.plan.procedure import PLAN_JEPA_PROCEDURE, assert_plan_jepa_procedure_config
 
-PLAN_JEPA_PROCEDURE: dict[str, Any] = {
-    "steps": (
-        "context_encoding",
-        "target_encoding_stop_gradient",
-        "autoregressive_prediction",
-        "jepa_loss",
-        "sgd_update_theta_phi",
-        "ema_update_target",
-    ),
-    "optimized_modules": ("context_encoder", "predictor"),
-    "frozen_modules": ("target_encoder",),
-    "loss": "jepa_loss",
-    "optimizer": "SGD",
-    "ema_after_optimizer_step": True,
-    "target_stop_gradient": True,
-}
+__all__ = [
+    "JEPAForwardResult",
+    "PLAN_JEPA_PROCEDURE",
+    "assert_plan_jepa_procedure_config",
+    "jepa_forward_batch",
+    "jepa_sgd_and_ema_step",
+]
 
 
 @dataclass(frozen=True)
@@ -51,47 +42,6 @@ class JEPAForwardResult:
     z_pred: torch.Tensor
     loss: torch.Tensor
     commands_norm: torch.Tensor
-
-
-def assert_plan_jepa_procedure_config(config: dict[str, Any]) -> None:
-    """
-    Validate config documents plan §13 training procedure invariants.
-
-    Call from baseline entry scripts. Does not enforce batch/Kp (smoke-safe).
-    """
-    errors: list[str] = []
-    jepa = config.get("ts_jepa", {})
-    opt = jepa.get("optimizer", {})
-    tgt = jepa.get("target_encoder", {})
-    loss = jepa.get("loss", {})
-    proc = jepa.get("training_procedure", {})
-
-    if str(opt.get("type", "")) != "SGD":
-        errors.append(f"plan §13 step 5 requires SGD; got optimizer.type={opt.get('type')!r}")
-    if not bool(tgt.get("stop_gradient", False)):
-        errors.append("plan §13 step 2 requires target_encoder.stop_gradient=true")
-    if str(tgt.get("update_rule", "")) != "ema":
-        errors.append("plan §13 step 6 requires target_encoder.update_rule='ema'")
-    if str(loss.get("implementation", "")) not in {
-        "negative_mean_cosine_similarity",
-        "one_minus_mean_cosine_similarity",
-        "one_minus_cosine_similarity",
-    }:
-        errors.append("plan §13 step 4 requires cosine JEPA loss implementation")
-
-    if proc:
-        steps = tuple(proc.get("steps", ()))
-        if steps and steps != PLAN_JEPA_PROCEDURE["steps"]:
-            errors.append(
-                f"ts_jepa.training_procedure.steps must match plan §13 order; got {list(steps)}"
-            )
-        if proc.get("ema_after_optimizer_step") is False:
-            errors.append("plan §13 requires ema_after_optimizer_step=true")
-        if proc.get("target_stop_gradient") is False:
-            errors.append("plan §13 requires training_procedure.target_stop_gradient=true")
-
-    if errors:
-        raise ValueError("Plan §13 JEPA training procedure mismatch:\n  - " + "\n  - ".join(errors))
 
 
 def jepa_forward_batch(

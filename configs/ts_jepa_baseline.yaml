@@ -82,7 +82,7 @@ environment:
   context_tensor_shape: [6, 64, 128]
   force_range_N: [-20.0, 20.0]
   sampling_interval_ms: 1
-  validation: plan_section_3_3  # run via scripts/validate_environment.py before training
+  validation: plan_section_3_3  # run via scripts/pipeline/validate_environment.py before training
 
 input:
   channels_per_rgb_frame: 3
