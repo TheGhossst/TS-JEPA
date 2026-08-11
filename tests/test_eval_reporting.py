@@ -153,13 +153,8 @@ def test_baseline_report_single_seed_test_losses(tmp_path: Path, monkeypatch: py
         lambda *args, **kwargs: {"nmae": 1.0, "nmae_by_horizon": {"1": 1.0}, "kp": 1, "split": "jepa_test_untouched"},
     )
     monkeypatch.setattr(
-        "ts_jepa.evaluation.evaluate.evaluate_with_scheduler",
-        lambda *args, **kwargs: {
-            "mean_control_score": 0.0,
-            "schedule_receive_rate": 0.0,
-            "forces": [],
-            "scores": [],
-        },
+        "ts_jepa.evaluation.evaluate.evaluate_embedding_tsne",
+        lambda *args, **kwargs: {"num_samples": 10, "coords": [[0.0, 0.0]], "cart_positions": [0.0]},
     )
 
     report = baseline_report(config, _StubController(), data_root=Path(config["paths"]["data_root"]))  # type: ignore[arg-type]
@@ -167,3 +162,5 @@ def test_baseline_report_single_seed_test_losses(tmp_path: Path, monkeypatch: py
     assert report["test_losses"]["jepa"]["best_test_loss"] == pytest.approx(0.0036427)
     assert report["test_losses"]["semantic_actor"]["source"] == "seed_metrics"
     assert report["test_losses"]["semantic_actor"]["best_test_loss"] == pytest.approx(0.715953)
+    assert "baseline_validation" in report
+    assert "wireless" not in report

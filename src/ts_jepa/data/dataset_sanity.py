@@ -1,4 +1,4 @@
-"""Post-generation trajectory dataset sanity checks (IMPLEMENTATION CHOICE)."""
+"""Post-generation trajectory dataset sanity checks (plan §4 + IMPLEMENTATION CHOICE)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import numpy as np
 
 from ts_jepa.config import project_root
 from ts_jepa.data.datasets import fit_command_normalizer
+from ts_jepa.data.trajectory_generator import CONTROL_TEACHER_TYPE
 from ts_jepa.preprocessing.command_stats import CommandNormalizer
 
 
@@ -19,6 +20,79 @@ SPLIT_SPECS = (
     ("actor", "train", "semantic_actor", "train_trajectories"),
     ("actor", "test", "semantic_actor", "test_trajectories"),
 )
+
+
+def _lag1_autocorr(values: np.ndarray) -> float:
+    x = np.asarray(values, dtype=np.float64).reshape(-1)
+    if x.size < 3:
+        return float("nan")
+    a = x[:-1] - x[:-1].mean()
+    b = x[1:] - x[1:].mean()
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if denom < 1e-12:
+        return 0.0
+    return float(np.dot(a, b) / denom)
+
+
+def verify_not_uniform_random_actions(
+    commands_by_trajectory: list[np.ndarray],
+    *,
+    force_min: float = -20.0,
+    force_max: float = 20.0,
+    seed: int = 0,
+    autocorr_margin: float = 0.02,
+) -> dict[str, Any]:
+    """
+    Plan §4.1: explicitly verify commands are not i.i.d. Uniform(force_min, force_max).
+
+    Uses lag-1 autocorrelation and histogram structure vs a synthetic uniform-iid reference.
+    """
+    if not commands_by_trajectory:
+        return {
+            "policy_mean_lag1_autocorr": float("nan"),
+            "uniform_iid_mean_lag1_autocorr": float("nan"),
+            "checks": {"has_trajectories": False},
+            "pass": False,
+        }
+
+    rng = np.random.default_rng(seed)
+    policy_autocorrs = [_lag1_autocorr(c) for c in commands_by_trajectory if np.asarray(c).size >= 3]
+    policy_mean_ac = float(np.nanmean(policy_autocorrs)) if policy_autocorrs else float("nan")
+
+    uniform_autocorrs = []
+    for cmds in commands_by_trajectory:
+        c = np.asarray(cmds).reshape(-1)
+        if c.size < 3:
+            continue
+        u = rng.uniform(force_min, force_max, size=c.size)
+        uniform_autocorrs.append(_lag1_autocorr(u))
+    uniform_mean_ac = float(np.nanmean(uniform_autocorrs)) if uniform_autocorrs else float("nan")
+
+    all_cmds = np.concatenate([np.asarray(c).reshape(-1) for c in commands_by_trajectory])
+    bins = np.linspace(force_min, force_max, 12)
+    counts, _ = np.histogram(all_cmds, bins=bins)
+    counts = counts.astype(np.float64) + 1e-6
+    hist_cv = float(counts.std() / counts.mean())
+
+    ref = rng.uniform(force_min, force_max, size=all_cmds.size)
+    ref_counts, _ = np.histogram(ref, bins=bins)
+    ref_counts = ref_counts.astype(np.float64) + 1e-6
+    ref_cv = float(ref_counts.std() / ref_counts.mean())
+
+    checks = {
+        "has_trajectories": True,
+        "command_std_gt_0": float(np.std(all_cmds)) > 0.0,
+        "autocorr_exceeds_uniform_iid": abs(policy_mean_ac) > abs(uniform_mean_ac) + autocorr_margin,
+        "histogram_more_structured_than_uniform_iid": hist_cv > ref_cv * 0.75,
+    }
+    return {
+        "policy_mean_lag1_autocorr": policy_mean_ac,
+        "uniform_iid_mean_lag1_autocorr": uniform_mean_ac,
+        "command_histogram_cv": hist_cv,
+        "uniform_reference_histogram_cv": ref_cv,
+        "checks": checks,
+        "pass": all(checks.values()),
+    }
 
 
 def _command_stats(commands: np.ndarray) -> dict[str, Any]:
@@ -52,6 +126,8 @@ def inspect_split(
     *,
     expected_count: int,
     expected_steps: int,
+    expected_render_hw: tuple[int, int] | None = None,
+    expected_teacher: str = CONTROL_TEACHER_TYPE,
 ) -> dict[str, Any]:
     files = sorted(split_dir.glob("*.npz"))
     out: dict[str, Any] = {
@@ -73,6 +149,8 @@ def inspect_split(
     errors: list[str] = []
     length_ok = True
     finite_ok = True
+    metadata_ok = True
+    frame_shape_ok = True
     for path in files:
         with np.load(path) as data:
             frames = np.asarray(data["frames"])
@@ -80,6 +158,19 @@ def inspect_split(
             states = np.asarray(data["states"])
             traj_id = int(np.asarray(data["trajectory_index"]).item())
             ids.append(traj_id)
+            if "control_teacher" in data:
+                teacher = str(np.asarray(data["control_teacher"]).item())
+                if teacher != expected_teacher:
+                    metadata_ok = False
+                    errors.append(f"{path.name}: control_teacher={teacher!r}, expected {expected_teacher!r}")
+            else:
+                metadata_ok = False
+                errors.append(f"{path.name}: missing control_teacher metadata (regenerate dataset)")
+            if expected_render_hw is not None:
+                exp_h, exp_w = expected_render_hw
+                if frames.ndim != 4 or frames.shape[1:3] != (exp_h, exp_w) or frames.shape[3] != 3:
+                    frame_shape_ok = False
+                    errors.append(f"{path.name}: frame shape {frames.shape}, expected (*, {exp_h}, {exp_w}, 3)")
             if frames.shape[0] != expected_steps or cmds.shape[0] != expected_steps or states.shape[0] != expected_steps:
                 length_ok = False
                 errors.append(f"{path.name}: length mismatch frames/cmds/states vs {expected_steps}")
@@ -100,6 +191,8 @@ def inspect_split(
     checks["count_ok"] = bool(out["count_ok"])
     checks["length_ok"] = bool(length_ok)
     checks["finite_ok"] = bool(finite_ok)
+    checks["metadata_ok"] = bool(metadata_ok)
+    checks["frame_shape_ok"] = bool(frame_shape_ok)
     out["command_stats"] = stats
     out["trajectory_ids"] = sorted(ids)
     out["pass"] = checks
@@ -121,21 +214,42 @@ def sanity_check_trajectory_root(
     """
     root = Path(data_root)
     steps = int(config["simulation"]["trajectory_steps"])
+    render_hw = (int(config["simulation"]["render_height"]), int(config["simulation"]["render_width"]))
     report: dict[str, Any] = {
         "data_root": str(root),
         "trajectory_steps": steps,
+        "sampling_interval_ms": float(config["simulation"]["sampling_interval_ms"]),
+        "dt": float(config["simulation"]["dt"]),
+        "control_teacher": CONTROL_TEACHER_TYPE,
         "init_noise": float(config["simulation"]["init_noise"]),
         "splits": {},
         "id_overlap": {},
+        "teacher_not_uniform_random": None,
         "command_normalizer": None,
         "pass": {},
     }
 
+    commands_by_traj: list[np.ndarray] = []
     for family, split, cfg_key, count_key in SPLIT_SPECS:
         expected = int(config[cfg_key]["dataset"][count_key])
         split_dir = root / "trajectories" / family / split
         key = f"{family}_{split}"
-        report["splits"][key] = inspect_split(split_dir, expected_count=expected, expected_steps=steps)
+        report["splits"][key] = inspect_split(
+            split_dir,
+            expected_count=expected,
+            expected_steps=steps,
+            expected_render_hw=render_hw,
+        )
+        for path in sorted(split_dir.glob("*.npz")):
+            with np.load(path) as data:
+                commands_by_traj.append(np.asarray(data["commands"]))
+
+    teacher_check = verify_not_uniform_random_actions(
+        commands_by_traj,
+        force_min=float(config["simulation"]["control_min_N"]),
+        force_max=float(config["simulation"]["control_max_N"]),
+    )
+    report["teacher_not_uniform_random"] = teacher_check
 
     # Train/test ID separation within each family (paper protocol).
     for family in ("jepa", "actor"):
@@ -175,10 +289,12 @@ def sanity_check_trajectory_root(
     overlap_ok = all(report["id_overlap"][f]["no_overlap"] for f in ("jepa", "actor"))
     norm = report["command_normalizer"] or {}
     norm_ok = bool(norm.get("nondegenerate"))
+    teacher_ok = bool(teacher_check.get("pass"))
     report["pass"] = {
         "all_splits": split_ok,
         "no_train_test_id_overlap": overlap_ok,
         "command_normalizer_nondegenerate": norm_ok,
+        "teacher_not_uniform_random": teacher_ok,
     }
-    report["overall_pass"] = bool(split_ok and overlap_ok and norm_ok)
+    report["overall_pass"] = bool(split_ok and overlap_ok and norm_ok and teacher_ok)
     return report

@@ -115,10 +115,10 @@ def test_independent_seed_initialization():
     config = load_config()
     _set_seed(0)
     m0 = TSJEPA(config)
-    w0 = m0.context_encoder.fc.weight.detach().clone()
+    w0 = m0.context_encoder.projection.weight.detach().clone()
     _set_seed(1)
     m1 = TSJEPA(config)
-    w1 = m1.context_encoder.fc.weight.detach().clone()
+    w1 = m1.context_encoder.projection.weight.detach().clone()
     assert not torch.allclose(w0, w1)
 
 
@@ -132,7 +132,7 @@ def test_five_seed_loop_independent_init_and_val_only_selection(tmp_path: Path):
     for seed in config["evaluation"]["seeds"]:
         _set_seed(int(seed))
         model = TSJEPA(config)
-        inits[seed] = model.context_encoder.fc.weight.detach().clone()
+        inits[seed] = model.context_encoder.projection.weight.detach().clone()
     assert not torch.allclose(inits[0], inits[1])
 
     summary = train_ts_jepa_repetitions(config, device=torch.device("cpu"), max_epochs=1, data_root=root)

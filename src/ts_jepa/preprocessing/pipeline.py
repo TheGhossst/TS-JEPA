@@ -6,9 +6,22 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from ts_jepa.preprocessing.plan import EVAL_PIPELINE_STAGES, TRAINING_PIPELINE_STAGES
+
 
 class PreprocessPipeline:
-    """Paper-faithful RGB preprocessing and κ-frame context construction."""
+    """
+    Paper-faithful RGB preprocessing and κ-frame context construction.
+
+    Plan §5.1 training:
+      raw RGB → augmentation → normalization → formatting (Gaussian blur + resize)
+
+    Plan §5.2 evaluation:
+      raw RGB → resize → normalization (no stochastic augmentations, no blur)
+    """
+
+    training_stages = TRAINING_PIPELINE_STAGES
+    eval_stages = EVAL_PIPELINE_STAGES
 
     def __init__(self, config: dict[str, Any], training: bool = True) -> None:
         self.config = config
@@ -25,9 +38,14 @@ class PreprocessPipeline:
         self.construction = inp.get("multi_frame_tensor_construction", "channel_concat")
         self._blur_kernels: dict[float, torch.Tensor] = {}
 
-    def _rng(self) -> np.random.Generator:
-        # Honor process-wide NumPy seeding used by trainers.
+    def _rng(self, rng: np.random.Generator | None = None) -> np.random.Generator:
+        if rng is not None:
+            return rng
         return np.random.default_rng(int(np.random.randint(0, 2**31 - 1)))
+
+    def _decode_frame(self, frame: np.ndarray) -> torch.Tensor:
+        """Raw uint8 HWC RGB → float CHW in [0, 1]."""
+        return torch.from_numpy(np.ascontiguousarray(frame)).permute(2, 0, 1).float() / 255.0
 
     def _gaussian_kernel_2d(self, sigma: float) -> torch.Tensor:
         key = round(float(sigma), 5)
@@ -40,13 +58,16 @@ class PreprocessPipeline:
         yy, xx = torch.meshgrid(ys, xs, indexing="ij")
         kernel = torch.exp(-(xx**2 + yy**2) / (2.0 * sigma**2 + 1e-12))
         kernel = kernel / kernel.sum()
-        # Depthwise conv weight: [C, 1, kH, kW]
         weight = kernel.view(1, 1, k_h, k_w).repeat(3, 1, 1, 1)
         self._blur_kernels[key] = weight
         return weight
 
+    def _augment(self, img: torch.Tensor, rng: np.random.Generator) -> torch.Tensor:
+        """Plan §5.1 augmentation: color jitter + probabilistic grayscale/color drop."""
+        img = self._color_jitter(img, rng)
+        return self._color_drop(img, rng)
+
     def _color_jitter(self, img: torch.Tensor, rng: np.random.Generator) -> torch.Tensor:
-        # img: [3,H,W] in [0,1]
         b = 1.0 + float(rng.uniform(-self.jitter["brightness"], self.jitter["brightness"]))
         c = 1.0 + float(rng.uniform(-self.jitter["contrast"], self.jitter["contrast"]))
         s = 1.0 + float(rng.uniform(-self.jitter["saturation"], self.jitter["saturation"]))
@@ -57,7 +78,6 @@ class PreprocessPipeline:
         img = (img * s + gray * (1.0 - s)).clamp(0.0, 1.0)
         hue_delta = float(rng.uniform(-self.jitter["hue"], self.jitter["hue"]))
         if abs(hue_delta) > 1e-8:
-            # Approximate hue shift in YIQ chrominance plane.
             y = 0.299 * img[0] + 0.587 * img[1] + 0.114 * img[2]
             i = 0.596 * img[0] - 0.275 * img[1] - 0.321 * img[2]
             q = 0.212 * img[0] - 0.523 * img[1] + 0.311 * img[2]
@@ -77,29 +97,49 @@ class PreprocessPipeline:
         luma = 0.299 * img[0] + 0.587 * img[1] + 0.114 * img[2]
         return torch.stack([luma, luma, luma], dim=0)
 
-    def _gaussian_resize(self, img: torch.Tensor, rng: np.random.Generator | None) -> torch.Tensor:
-        sigma = float(np.mean(self.sigma_range) if rng is None else rng.uniform(self.sigma_range[0], self.sigma_range[1]))
+    def _normalize(self, img: torch.Tensor) -> torch.Tensor:
+        """Plan §5.1 / §5.2 ImageNet normalization."""
+        return (img - self.mean) / self.std
+
+    def _resize(self, img: torch.Tensor) -> torch.Tensor:
+        h, w = self.resize_hw
+        if img.shape[-2:] == (h, w):
+            return img
+        x = F.interpolate(img.unsqueeze(0), size=(h, w), mode="bilinear", align_corners=False)
+        return x.squeeze(0)
+
+    def _gaussian_blur(self, img: torch.Tensor, rng: np.random.Generator) -> torch.Tensor:
+        """Plan §5.1 formatting: 5×5 Gaussian blur with σ ~ Uniform[0.1, 0.2]."""
+        sigma = float(rng.uniform(self.sigma_range[0], self.sigma_range[1]))
         weight = self._gaussian_kernel_2d(sigma)
         pad_h = self.gaussian_kernel[0] // 2
         pad_w = self.gaussian_kernel[1] // 2
         x = F.pad(img.unsqueeze(0), (pad_w, pad_w, pad_h, pad_h), mode="reflect")
         x = F.conv2d(x, weight, groups=3)
-        h, w = self.resize_hw
-        x = F.interpolate(x, size=(h, w), mode="bilinear", align_corners=False)
         return x.squeeze(0)
 
-    def process_frame(self, frame: np.ndarray, stochastic: bool | None = None) -> torch.Tensor:
+    def _format_training(self, img: torch.Tensor, rng: np.random.Generator) -> torch.Tensor:
+        """Plan §5.1 formatting: Gaussian blur then resize to 64×128."""
+        img = self._gaussian_blur(img, rng)
+        return self._resize(img)
+
+    def process_frame(
+        self,
+        frame: np.ndarray,
+        stochastic: bool | None = None,
+        rng: np.random.Generator | None = None,
+    ) -> torch.Tensor:
         use_aug = self.training if stochastic is None else stochastic
-        rng = self._rng() if use_aug else None
-        img = torch.from_numpy(np.ascontiguousarray(frame)).permute(2, 0, 1).float() / 255.0
+        img = self._decode_frame(frame)
         if use_aug:
-            assert rng is not None
-            img = self._color_jitter(img, rng)
-            img = self._color_drop(img, rng)
-            img = self._gaussian_resize(img, rng)
+            gen = self._rng(rng)
+            img = self._augment(img, gen)
+            img = self._normalize(img)
+            img = self._format_training(img, gen)
         else:
-            img = self._gaussian_resize(img, None)
-        return (img - self.mean) / self.std
+            img = self._resize(img)
+            img = self._normalize(img)
+        return img
 
     def process_frames_cached(
         self,
@@ -122,9 +162,7 @@ class PreprocessPipeline:
         return torch.cat(selected, dim=0)
 
     def make_context_tensor(self, frames: np.ndarray, time_index: int, kappa: int | None = None) -> torch.Tensor:
-        """
-        κ consecutive frames. Channel-concat to [6, H, W] for κ=2 is IMPLEMENTATION CHOICE.
-        """
+        """κ consecutive frames channel-concatenated (κ=2 → [6, H, W])."""
         k = self.kappa if kappa is None else int(kappa)
         start = max(0, time_index - k + 1)
         processed = self.process_frames_cached(frames, start, time_index, stochastic=self.training)

@@ -7,7 +7,14 @@ import argparse
 import json
 
 from ts_jepa.config import apply_cli_path_overrides, jepa_run_dirname, load_config, project_root
+from ts_jepa.data.temporal_plan import assert_plan_temporal_config
+from ts_jepa.env.env_validation import assert_plan_environment_validated
+from ts_jepa.losses.loss_plan import assert_plan_jepa_loss_config
+from ts_jepa.models.predictor_command_resolution import assert_plan_predictor_command_resolution
+from ts_jepa.models.predictor_plan import assert_plan_predictor_config
 from ts_jepa.device import describe_device, select_device
+from ts_jepa.training.jepa_procedure import assert_plan_jepa_procedure_config
+from ts_jepa.training.jepa_training_plan import assert_plan_jepa_training_config
 from ts_jepa.training.train_jepa import train_ts_jepa, train_ts_jepa_repetitions
 
 
@@ -36,6 +43,13 @@ def main() -> None:
     )
     args = parser.parse_args()
     config = load_config(args.config)
+    assert_plan_environment_validated(config)
+    assert_plan_temporal_config(config)
+    assert_plan_predictor_config(config)
+    assert_plan_predictor_command_resolution(config)
+    assert_plan_jepa_loss_config(config)
+    assert_plan_jepa_training_config(config)
+    assert_plan_jepa_procedure_config(config)
     apply_cli_path_overrides(config, data_root=args.data_root, runs_root=args.runs_root)
     device = select_device(args.device)
     print(describe_device(device))

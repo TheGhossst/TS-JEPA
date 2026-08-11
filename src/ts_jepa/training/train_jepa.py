@@ -12,8 +12,14 @@ from tqdm import tqdm
 from ts_jepa.config import jepa_run_dirname, project_root
 from ts_jepa.data.datasets import TrajectoryDataset, fit_command_normalizer, load_command_normalizer
 from ts_jepa.device import select_device
-from ts_jepa.losses.cosine import cosine_alignment_loss
+from ts_jepa.models.predictor_command_resolution import load_predictor_command_resolution
 from ts_jepa.models.ts_jepa import TSJEPA
+from ts_jepa.training.jepa_optimizer import (
+    apply_jepa_lr_decay,
+    build_jepa_optimizer,
+    should_apply_jepa_lr_decay,
+)
+from ts_jepa.training.jepa_procedure import jepa_forward_batch, jepa_sgd_and_ema_step
 from ts_jepa.runtime import (
     CUDAPrefetcher,
     DataLoaderStallError,
@@ -100,18 +106,14 @@ def evaluate_cosine_loss(
     device: torch.device,
 ) -> float:
     model.eval()
+    resolution = model.command_resolution
     total = 0.0
     n_batches = 0
     try:
         for batch in CUDAPrefetcher(loader, device):
-            context = batch["context"]
-            future = batch["future_frames"]
-            # Teacher/trajectory control sequence (not Semantic Actor predictions).
-            teacher_commands_norm = batch["teacher_commands_norm"]
-            z = model.encode_context(context)
-            z_tgt = model.encode_targets(future)
-            z_pred = model.predict(z, teacher_commands_norm)
-            total += float(cosine_alignment_loss(z_pred, z_tgt).item())
+            # Plan §13 steps 1–4 (eval; no SGD/EMA).
+            result = jepa_forward_batch(model, batch, resolution)
+            total += float(result.loss.item())
             n_batches += 1
     except DataLoaderStallError:
         raise
@@ -133,7 +135,7 @@ def train_ts_jepa(
 
     Model selection uses validation carved from the train split only.
     The untouched JEPA test set is evaluated after training and never used for selection.
-    Predictor conditioning uses the trajectory/teacher control sequence.
+    Predictor conditioning uses the plan §10 documented candidate (see command_resolution).
     """
     device = select_device(device)
     _set_seed(seed)
@@ -238,16 +240,14 @@ def _train_ts_jepa_body(
     )
 
     model = TSJEPA(config).to(device)
-    optimizer = torch.optim.SGD(
-        list(model.context_encoder.parameters()) + list(model.predictor.parameters()),
-        lr=float(opt_cfg["learning_rate"]),
-        weight_decay=float(opt_cfg["weight_decay"]),
-        momentum=0.0,
+    resolution = model.command_resolution
+    watchdog.log(
+        "predictor_command_resolution "
+        + json.dumps(resolution.to_dict(), separators=(",", ":"))
     )
+    optimizer = build_jepa_optimizer(model, config)
 
     epochs = int(max_epochs if max_epochs is not None else opt_cfg["epochs"])
-    lr_factor = float(config["ts_jepa"]["lr_decay"]["factor"])
-    lr_interval = int(config["ts_jepa"]["lr_decay"]["interval_epochs"])
     patience = int(config["ts_jepa"]["early_stopping"]["patience"])
     best_val = float("inf")
     best_state = None
@@ -295,15 +295,9 @@ def _train_ts_jepa_body(
                 micros_seen += 1
                 watchdog.touch(micro=micros_seen, stage="forward")
                 try:
-                    context = batch["context"]
-                    future = batch["future_frames"]
-                    teacher_commands_norm = batch["teacher_commands_norm"]
-
-                    z = model.encode_context(context)
-                    with torch.no_grad():
-                        z_tgt = model.encode_targets(future)
-                    z_pred = model.predict(z, teacher_commands_norm)
-                    loss = cosine_alignment_loss(z_pred, z_tgt)
+                    # Plan §13 steps 1–4 (context → target stop-grad → predict → loss).
+                    result = jepa_forward_batch(model, batch, resolution)
+                    loss = result.loss
                     # Scale so accumulated grads match mean loss over the effective batch.
                     watchdog.touch(micro=micros_seen, stage="backward")
                     (loss / accum_steps).backward()
@@ -324,9 +318,8 @@ def _train_ts_jepa_body(
 
                 try:
                     watchdog.touch(micro=micros_seen, stage="optimizer")
-                    optimizer.step()
-                    model.ema_step()
-                    optimizer.zero_grad(set_to_none=True)
+                    # Plan §13 steps 5–6: SGD(θ,ϕ) then EMA(θ̄).
+                    jepa_sgd_and_ema_step(model, optimizer)
                     assert group_loss_sum is not None
                     step_loss = float(group_loss_sum.item()) / accum_steps
                 except Exception as exc:
@@ -385,16 +378,16 @@ def _train_ts_jepa_body(
                     "val_loss": best_val,
                     "seed": seed,
                     "selection_split": "train_holdout_validation",
+                    "predictor_command_resolution": resolution.to_dict(),
                 },
             )
             watchdog.log(f"saved best.pt epoch={epoch} val_loss={best_val:.6f}")
         else:
             stale += 1
 
-        if epoch % lr_interval == 0:
-            for group in optimizer.param_groups:
-                group["lr"] *= lr_factor
-            watchdog.log(f"lr decayed to {optimizer.param_groups[0]['lr']}")
+        if should_apply_jepa_lr_decay(epoch, config):
+            new_lr = apply_jepa_lr_decay(optimizer, config)
+            watchdog.log(f"lr decayed to {new_lr}")
 
         if config["ts_jepa"]["early_stopping"]["enabled"] and stale >= patience:
             watchdog.log(f"early stop epoch={epoch} stale={stale}")
@@ -420,6 +413,7 @@ def _train_ts_jepa_body(
         "seed": seed,
         "selection_split": "train_holdout_validation",
         "test_split": "jepa_test_untouched",
+        "predictor_command_resolution": resolution.to_dict(),
     }
     save_checkpoint(runs / "last.pt", payload)
     with (runs / "metrics.json").open("w", encoding="utf-8") as handle:
@@ -495,6 +489,7 @@ def train_ts_jepa_repetitions(
         "best_test_loss": best["test_loss"],
         "seed_results": selected["seed_results"],
         "best_checkpoint": str(root_runs / "best.pt"),
+        "predictor_command_resolution": load_predictor_command_resolution(config).to_dict(),
     }
     with (root_runs / "repetition_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2)

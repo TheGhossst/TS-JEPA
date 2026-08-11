@@ -22,8 +22,8 @@ runtime:
   stall_timeout_s: 180        # IC — emit STALL if no microbatch progress this long
 
 simulation:
-  environment: inverted_cart_pole
-  state_representation: RGB
+  environment: inverted_cart_pole  # plan §3 — custom backend, not Gym CartPole-v1
+  state_representation: RGB        # plan §3.1 — RGB observations, not raw 4D state
   sampling_interval_ms: 1
   dt: 0.001
   trajectory_steps: 100
@@ -32,8 +32,8 @@ simulation:
   process_noise_std: 0.0  # Ns=0 deterministic baseline (IC)
   desired_state: [0.0, 0.0, 0.0, 0.0]  # IC
   init_noise: 0.35  # IC — wide enough that DP policy is exercised (not only π=0 deadzone)
-  render_height: 96  # IC — not a paper-required camera resolution
-  render_width: 192  # IC
+  render_height: 64
+  render_width: 128
   position_tol: 0.05
   angle_tol: 0.05
   physics:  # IMPLEMENTATION CHOICE
@@ -42,6 +42,20 @@ simulation:
     pole_length: 0.5
     gravity: 9.81
     track_limit: 2.4
+
+# Plan §4 dataset generation (counts mirrored in ts_jepa/semantic_actor.dataset blocks).
+dataset_generation:
+  D_s:
+    purpose: ts_jepa
+    train_trajectories: 200
+    test_trajectories: 40
+  D_a:
+    purpose: semantic_actor
+    train_trajectories: 100
+    test_trajectories: 20
+  steps_per_trajectory: 100
+  sampling_interval_ms: 1
+  control_teacher: dp_nonlinear  # NOT Uniform(-20, 20) — see plan §4.1
 
 control_teacher:  # method PAPER-SPECIFIED; numeric grids PAPER-SILENT → IC
   force_min_N: -20.0
@@ -56,6 +70,19 @@ control_teacher:  # method PAPER-SPECIFIED; numeric grids PAPER-SILENT → IC
     x_dot: [-2.5, 2.5, 11]
     theta: [-0.35, 0.35, 13]
     theta_dot: [-3.0, 3.0, 11]
+
+# Plan §3 environment (values mirrored in simulation.* and input.*).
+environment:
+  name: inverted_cart_pole
+  observation: RGB
+  backend: custom  # not Gym CartPole-v1
+  render_resolution: [64, 128]
+  channels: 3
+  kappa: 2
+  context_tensor_shape: [6, 64, 128]
+  force_range_N: [-20.0, 20.0]
+  sampling_interval_ms: 1
+  validation: plan_section_3_3  # run via scripts/validate_environment.py before training
 
 input:
   channels_per_rgb_frame: 3
@@ -73,7 +100,29 @@ input:
     std: [0.229, 0.224, 0.225]
   gaussian_kernel: [5, 5]
   gaussian_sigma_range: [0.1, 0.2]
-  command_normalization: z-score
+  command_normalization: z-score  # plan §5.3
+
+# Plan §5 preprocessing pipeline (values mirrored in input.* above).
+preprocessing:
+  training:
+    order: [augmentation, normalization, formatting]
+    augmentation: [color_jitter, color_drop]
+    formatting: [gaussian_blur, resize]
+  evaluation:
+    order: [resize, normalization]
+    stochastic_augmentations: false
+    gaussian_blur: false
+  final_resolution: [64, 128]
+
+# Plan §8 temporal configuration (values mirrored in input.kappa / prediction_horizon.Kp / encoder.embedding_dim).
+temporal:
+  kappa: 2
+  Kp: 15
+  embedding_dim: 256
+  context_frames: "[x_k-1, x_k]"
+  control_sequence: "[u_k, ..., u_{k+Kp-1}]"
+  target_frames: "[x_{k+1}, ..., x_{k+Kp}]"  # encoded as κ-windows ending at each target time
+  predicted_latents: "[z~_{k+1}, ..., z~_{k+Kp}]"
 
 ts_jepa:
   encoder:
@@ -84,29 +133,81 @@ ts_jepa:
     embedding_dim: 256
     embedding_dim_status: paper_implied_baseline
     fig7_candidate_dimensions: [64, 128, 256, 350]
-    blocks_per_stage: 2  # IC
-  target_encoder:
+    blocks_per_stage: 2  # IC — plan §6.1 / §26.2 VERIFY
+    stem:  # plan §6.1
+      kernel_size: 7
+      stride: 2
+      pooling: max
+  target_encoder:  # plan §7
+    architecture: same_as_context_encoder
+    initialization: copy_context_weights
+    trainable: false
+    stop_gradient: true
+    update_rule: ema
     ema_decay: 0.99
-  predictor:
+  predictor:  # plan §9
     type: MLP
     hidden_dim: 1024
     output_dim: 256
-    input_tensor_construction: concat_embedding_and_command  # IC
+    activation: ReLU
+    input_tensor_construction: concat_embedding_and_command
+    autoregressive: true
+    inputs: [embedding, control_command]
+    forbidden_inputs: [virtual_inputs, virtual_channel_variables, virtual_channel_embeddings]
+    command_source: teacher_dp
+  # Plan §10 / §26.1 — predicted-command training ambiguity (OPEN).
+  predictor_command_resolution:
+    status: OPEN
+    status_description: PENDING_PAPER_IMPLEMENTATION_RESOLUTION
+    selected_source: teacher_dp
+    paper_exact: false
+    candidates:
+      - teacher_dp
+      - semantic_actor
+      - sequential_actor_predictor
+      - recovered_from_source
+    notes: >
+      Paper notation uses predicted commands ũ during predictor training, but the
+      pretraining generation mechanism is not fully specified. Baseline selects the
+      teacher_dp candidate (DP trajectory ground-truth u*) — documented, NOT paper-exact.
+    inference_source: semantic_actor
+    inference_description: >
+      Packet-lost runtime predictor steps use the last semantic-actor command;
+      this is closed-loop inference and is separate from JEPA-training conditioning.
   prediction_horizon:
     Kp: 15
-  optimizer:
+  optimizer:  # plan §12 — paper-faithful; do not use Adam / LR=0.001 / EMA=0.996
     type: SGD
     learning_rate: 0.2
     batch_size: 256  # paper effective batch; gradients accumulated to this size
     microbatch_size: 16  # IC — GPU memory; accumulation = batch_size / microbatch_size
     epochs: 150
     weight_decay: 0.0004
-  lr_decay:
+    momentum: 0.0
+  lr_decay:  # plan §12 — multiply LR by 0.99 every 20 epochs
     factor: 0.99
     interval_epochs: 20
-  loss:
+  loss:  # plan §11
     paper_objective: cosine_similarity_alignment
-    implementation: one_minus_cosine_similarity
+    formula: "L_JEPA = -(1/Kp) * sum_{j=1}^{Kp} cos_sim(z_pred_j, z_target_j)"
+    cosine_similarity: "(z_pred · z_target) / (||z_pred||_2 * ||z_target||_2)"
+    implementation: negative_mean_cosine_similarity
+    minimizing_form: one_minus_mean_cosine_similarity
+    target_source: ema_target_encoder
+    target_stop_gradient: true
+  # Plan §13 — per-batch training procedure (enforced by jepa_forward_batch / jepa_sgd_and_ema_step).
+  training_procedure:
+    steps:
+      - context_encoding
+      - target_encoding_stop_gradient
+      - autoregressive_prediction
+      - jepa_loss
+      - sgd_update_theta_phi
+      - ema_update_target
+    optimized_modules: [context_encoder, predictor]
+    frozen_modules: [target_encoder]
+    target_stop_gradient: true
+    ema_after_optimizer_step: true
   early_stopping:
     enabled: true
     patience: 20  # IC
@@ -165,3 +266,7 @@ evaluation:
   reported_result: best
   control_position_tol: 0.05
   control_angle_tol: 0.05
+  # Plan §16: baseline validation required before wireless evaluation.
+  baseline_validation:
+    enabled: true
+  tsne_max_samples: 500

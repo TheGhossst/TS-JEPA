@@ -11,8 +11,8 @@ class CartPoleRenderer:
 
     def __init__(
         self,
-        height: int = 96,
-        width: int = 192,
+        height: int = 64,
+        width: int = 128,
         params: CartPoleParams | None = None,
     ) -> None:
         self.height = int(height)

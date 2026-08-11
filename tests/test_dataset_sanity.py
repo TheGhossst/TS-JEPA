@@ -9,9 +9,10 @@ from ts_jepa.config import load_config
 from ts_jepa.data.dataset_sanity import inspect_split, sanity_check_trajectory_root
 
 
-def _write_traj(path: Path, *, traj_id: int, steps: int, commands: np.ndarray) -> None:
+def _write_traj(path: Path, *, traj_id: int, steps: int, commands: np.ndarray, render_hw: tuple[int, int] = (64, 128)) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    frames = np.zeros((steps, 8, 8, 3), dtype=np.uint8)
+    h, w = render_hw
+    frames = np.zeros((steps, h, w, 3), dtype=np.uint8)
     states = np.zeros((steps, 4), dtype=np.float64)
     np.savez_compressed(
         path,
@@ -21,6 +22,11 @@ def _write_traj(path: Path, *, traj_id: int, steps: int, commands: np.ndarray) -
         split=np.asarray("test"),
         seed=np.asarray(10_000 + traj_id),
         trajectory_index=np.asarray(traj_id),
+        control_teacher=np.asarray("dp_nonlinear"),
+        sampling_interval_ms=np.asarray(1.0),
+        dt=np.asarray(0.001),
+        render_height=np.asarray(h),
+        render_width=np.asarray(w),
     )
 
 

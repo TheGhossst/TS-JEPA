@@ -1,5 +1,12 @@
-"""Loss functions."""
+"""Loss functions for TS-JEPA training."""
 
-from ts_jepa.losses.cosine import cosine_alignment_loss
+from ts_jepa.losses.jepa_loss import cosine_alignment_loss, jepa_cosine_similarity, jepa_loss
+from ts_jepa.losses.loss_plan import PLAN_JEPA_LOSS, assert_plan_jepa_loss_config
 
-__all__ = ["cosine_alignment_loss"]
+__all__ = [
+    "PLAN_JEPA_LOSS",
+    "assert_plan_jepa_loss_config",
+    "cosine_alignment_loss",
+    "jepa_cosine_similarity",
+    "jepa_loss",
+]

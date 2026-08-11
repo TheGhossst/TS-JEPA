@@ -17,8 +17,8 @@ class InvertedCartPoleEnv:
 
     def __init__(
         self,
-        render_height: int = 96,
-        render_width: int = 192,
+        render_height: int = 64,
+        render_width: int = 128,
         dt: float = 0.001,
         force_min: float = -20.0,
         force_max: float = 20.0,
@@ -72,6 +72,12 @@ class InvertedCartPoleEnv:
         return int(x_ok and theta_ok)
 
     def rollout(self, teacher: ControlPolicy, steps: int, seed: int) -> dict[str, np.ndarray]:
+        """
+        Roll out `steps` transitions with a control policy.
+
+        Plan §4.1 per step k:
+          observe state_k → render frame_k → teacher.act(state_k) → u*_k → step → state_{k+1}
+        """
         state = self.reset(seed=seed)
         frames = []
         commands = []

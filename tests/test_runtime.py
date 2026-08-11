@@ -16,7 +16,7 @@ def test_runtime_recv_and_lost_paths():
     actor = SemanticActor()
     normalizer = CommandNormalizer(mean=0.0, std=1.0)
     ctrl = FrozenRuntimeController(config, jepa, actor, normalizer, device=torch.device("cpu"))
-    frame = np.random.randint(0, 255, size=(96, 192, 3), dtype=np.uint8)
+    frame = np.random.randint(0, 255, size=(64, 128, 3), dtype=np.uint8)
     force_recv = ctrl.step_packet_received(frame)
     force_lost = ctrl.step_packet_lost()
     assert -20.0 <= force_recv <= 20.0

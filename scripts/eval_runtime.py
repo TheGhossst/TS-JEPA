@@ -3,14 +3,15 @@
 Evaluate a frozen JEPA + Semantic Actor pair.
 
 Modes:
-  all          — NMAE (Kp=1..15) + closed-loop + wireless (default)
+  baseline     — plan §16 checks: NMAE + closed-loop + t-SNE + validation gate (default)
+  all          — alias for baseline
   nmae         — prediction-horizon NMAE only (+ plot)
   closed_loop  — frozen closed-loop control scores only
-  wireless     — channel-aware / RR / opportunistic vs SNR only
+  tsne         — embedding t-SNE diagnostic only
+  wireless     — channel-aware / RR / opportunistic vs SNR (requires --force-wireless)
 
-Checkpoint resolution (unless overridden):
-  runs/<family>/best.pt  else  runs/<family>/seed_0/best.pt
-  or --seed N → runs/<family>/seed_N/best.pt
+Wireless evaluation is gated behind baseline validation (plan §16–§17).
+Use --include-wireless with baseline/all after validation passes.
 """
 
 from __future__ import annotations
@@ -25,12 +26,14 @@ from ts_jepa.evaluation.checkpoints import resolve_run_checkpoint
 from ts_jepa.evaluation.evaluate import (
     baseline_report,
     evaluate_closed_loop,
+    evaluate_embedding_tsne,
     evaluate_prediction_horizon_nmae,
     evaluate_with_scheduler,
+    validate_baseline,
     write_evaluation_artifacts,
 )
 from ts_jepa.evaluation.metrics import summarize_scores
-from ts_jepa.evaluation.plotting import plot_nmae_by_horizon, plot_wireless_control_scores
+from ts_jepa.evaluation.plotting import plot_embedding_tsne, plot_nmae_by_horizon, plot_wireless_control_scores
 from ts_jepa.inference.infer import FrozenRuntimeController
 
 
@@ -48,8 +51,18 @@ def main() -> None:
     parser.add_argument(
         "--mode",
         type=str,
-        default="all",
-        choices=("all", "nmae", "closed_loop", "wireless"),
+        default="baseline",
+        choices=("baseline", "all", "nmae", "closed_loop", "tsne", "wireless"),
+    )
+    parser.add_argument(
+        "--include-wireless",
+        action="store_true",
+        help="With baseline/all: run wireless eval only if baseline validation passes.",
+    )
+    parser.add_argument(
+        "--force-wireless",
+        action="store_true",
+        help="With wireless mode: skip baseline validation gate (debug only).",
     )
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument(
@@ -86,10 +99,23 @@ def main() -> None:
 
     controller = FrozenRuntimeController.from_checkpoints(config, jepa_ckpt, actor_ckpt, device=device)
 
-    if args.mode == "all":
-        report = baseline_report(config, controller)
+    if args.mode in ("baseline", "all"):
+        report = baseline_report(
+            config,
+            controller,
+            include_wireless=args.include_wireless,
+        )
         paths = write_evaluation_artifacts(report, out_dir)
-        print(json.dumps({"artifacts": paths, "report": report}, indent=2, default=str))
+        print(json.dumps({"artifacts": paths, "baseline_validation": report.get("baseline_validation")}, indent=2, default=str))
+        return
+
+    if args.mode == "tsne":
+        tsne_report = evaluate_embedding_tsne(config, controller)
+        tsne_json = out_dir / "embedding_tsne.json"
+        with tsne_json.open("w", encoding="utf-8") as handle:
+            json.dump(tsne_report, handle, indent=2)
+        plot_path = plot_embedding_tsne(tsne_report, out_dir / "embedding_tsne.png")
+        print(json.dumps({"embedding_tsne": tsne_report, "plot": str(plot_path)}, indent=2))
         return
 
     if args.mode == "nmae":
@@ -118,6 +144,12 @@ def main() -> None:
         return
 
     # wireless
+    if not args.force_wireless:
+        probe = baseline_report(config, controller, include_wireless=False)
+        validation = validate_baseline(probe, config)
+        if not validation.get("wireless_allowed"):
+            print(json.dumps({"error": "baseline_validation_failed", "checks": validation.get("checks")}, indent=2))
+            return
     wireless: dict = {}
     for policy in ("channel_aware", "round_robin", "opportunistic"):
         wireless[policy] = {}

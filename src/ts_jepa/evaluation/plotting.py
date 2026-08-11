@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import matplotlib.pyplot as plt
+import numpy as np
 
 
 def plot_nmae_by_horizon(
@@ -40,6 +41,37 @@ def plot_nmae_by_horizon(
     if overall is not None and overall == overall:  # not NaN
         ax.axhline(float(overall), color="C1", linestyle="--", label=f"overall={float(overall):.4f}")
         ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return out_path
+
+
+def plot_embedding_tsne(
+    tsne_report: Mapping[str, Any],
+    out_path: Path | str,
+    *,
+    title: str = "Context-encoder embeddings (t-SNE)",
+) -> Path:
+    """
+    Plot 2-D t-SNE of context embeddings colored by cart position.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    coords = np.asarray(tsne_report.get("coords") or [])
+    colors = np.asarray(tsne_report.get("cart_positions") or [])
+    if coords.ndim != 2 or coords.shape[1] != 2:
+        raise ValueError("tsne_report.coords must be [N, 2]")
+    if colors.size != coords.shape[0]:
+        raise ValueError("tsne_report.cart_positions length must match coords rows")
+
+    fig, ax = plt.subplots(figsize=(7, 5.5))
+    scatter = ax.scatter(coords[:, 0], coords[:, 1], c=colors, cmap="viridis", s=8, alpha=0.75)
+    ax.set_xlabel("t-SNE 1")
+    ax.set_ylabel("t-SNE 2")
+    ax.set_title(title)
+    cbar = fig.colorbar(scatter, ax=ax)
+    cbar.set_label("cart position x")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)

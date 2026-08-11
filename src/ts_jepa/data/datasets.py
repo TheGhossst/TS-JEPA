@@ -9,12 +9,25 @@ import torch
 from torch.utils.data import Dataset
 
 from ts_jepa.config import project_root
+from ts_jepa.data.temporal_plan import (
+    command_indices,
+    context_frame_indices,
+    max_valid_time_index,
+    target_end_indices,
+)
 from ts_jepa.preprocessing.command_stats import CommandNormalizer
 from ts_jepa.preprocessing.pipeline import PreprocessPipeline
 
 
 class TrajectoryDataset(Dataset):
-    """Dataset over trajectory time steps for TS-JEPA training."""
+    """
+    Dataset over trajectory time steps for TS-JEPA training.
+
+    Plan §8 sample at time index k:
+      context:  κ frames ending at k        → [x_k-1, x_k] when κ=2
+      controls: u_k .. u_{k+Kp-1}           → teacher_commands[Kp]
+      targets:  κ-windows ending at k+1..k+Kp → future_frames[Kp]
+    """
 
     def __init__(
         self,
@@ -43,7 +56,7 @@ class TrajectoryDataset(Dataset):
             self.frames.append(frames)
             self.commands.append(commands)
             length = int(commands.shape[0])
-            max_start = length - self.kp - 1
+            max_start = max_valid_time_index(length, self.kp)
             for time_index in range(max(0, max_start + 1)):
                 self.index_map.append((file_idx, time_index))
 
@@ -73,14 +86,14 @@ class TrajectoryDataset(Dataset):
         context = self.pipeline.assemble_context(processed, time_index, kappa=self.kappa)
         future_stack = torch.stack(
             [
-                self.pipeline.assemble_context(processed, time_index + offset, kappa=self.kappa)
-                for offset in range(1, self.kp + 1)
+                self.pipeline.assemble_context(processed, end_t, kappa=self.kappa)
+                for end_t in target_end_indices(time_index, self.kp)
             ],
             dim=0,
         )
-        # Trajectory/teacher control sequence from the DP teacher dataset.
-        # This is NOT Semantic Actor-predicted command ũ during JEPA training.
-        teacher_commands = commands[time_index : time_index + self.kp].astype(np.float32)
+        # Plan §8: [u_k, u_{k+1}, ..., u_{k+Kp-1}]
+        cmd_idx = command_indices(time_index, self.kp)
+        teacher_commands = commands[cmd_idx[0] : cmd_idx[0] + self.kp].astype(np.float32)
         teacher_commands_norm = self.normalizer.normalize(teacher_commands)
 
         return {

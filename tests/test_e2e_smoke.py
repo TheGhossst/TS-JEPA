@@ -1,4 +1,4 @@
-"""End-to-end smoke: tiny data + repetition protocol + NMAE + wireless."""
+"""End-to-end smoke: tiny data + repetition protocol + NMAE + baseline validation."""
 
 from __future__ import annotations
 
@@ -87,5 +87,10 @@ def test_end_to_end_smoke(tmp_path: Path):
     assert report["test_losses"]["jepa"]["best_test_loss"] is not None
     assert report["test_losses"]["semantic_actor"]["best_test_loss"] is not None
     assert report["test_losses"]["jepa"]["source"] == "repetition_summary"
-    assert "wireless" in report
-    assert "channel_aware" in report["wireless"]
+    assert "baseline_validation" in report
+    assert "embedding_tsne" in report
+    resolution = report["predictor_command_resolution"]
+    assert resolution["status"] == "OPEN"
+    assert resolution["selected_source"] == "teacher_dp"
+    assert resolution["paper_exact"] is False
+    assert "wireless" not in report

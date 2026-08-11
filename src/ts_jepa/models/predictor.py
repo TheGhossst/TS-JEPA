@@ -6,33 +6,66 @@ import torch.nn as nn
 
 class Predictor(nn.Module):
     """
-    Action-conditioned MLP predictor Pφ.
+    Action-conditioned MLP predictor Pφ (plan §9).
 
-    Paper-specified: hidden 1024, output 256.
-    Input concat(z, u_norm) is IMPLEMENTATION CHOICE.
+    Architecture (§9.1):
+      concat(z, u) → Linear → 1024 → ReLU → Linear → 256
 
-    During TS-JEPA training, u_norm is the trajectory/teacher control sequence
-    from the dataset (DP teacher), not Semantic Actor-predicted commands.
-    At lost-packet runtime, conditioning uses the runtime command sequence.
+    Applied autoregressively (§9.1):
+      z_{j+1} = Pφ(concat(z_j, u_j))
+
+    Inputs (§9.2): current embedding + control command only.
+    Forbidden: virtual-channel / virtual-input terms.
     """
 
-    def __init__(self, embedding_dim: int = 256, command_dim: int = 1, hidden_dim: int = 1024) -> None:
+    def __init__(
+        self,
+        embedding_dim: int = 256,
+        command_dim: int = 1,
+        hidden_dim: int = 1024,
+        output_dim: int | None = None,
+    ) -> None:
         super().__init__()
-        self.embedding_dim = embedding_dim
-        self.command_dim = command_dim
-        self.net = nn.Sequential(
-            nn.Linear(embedding_dim + command_dim, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, embedding_dim),
-        )
+        if int(hidden_dim) != 1024:
+            raise ValueError(f"plan §9.1 predictor hidden_dim must be 1024, got {hidden_dim}")
+        out_dim = int(output_dim if output_dim is not None else embedding_dim)
+        if out_dim != 256:
+            raise ValueError(f"plan §9.1 predictor output_dim must be 256, got {out_dim}")
+        if int(embedding_dim) != 256:
+            raise ValueError(f"plan §9 predictor embedding_dim must be 256, got {embedding_dim}")
+        if int(command_dim) != 1:
+            raise ValueError(f"plan §9 cart-pole control is scalar; command_dim must be 1, got {command_dim}")
+
+        self.embedding_dim = int(embedding_dim)
+        self.command_dim = int(command_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.output_dim = out_dim
+        self.input_dim = self.embedding_dim + self.command_dim
+
+        # Plan §9.1 layer stack
+        self.fc_in = nn.Linear(self.input_dim, self.hidden_dim)
+        self.relu = nn.ReLU(inplace=True)
+        self.fc_out = nn.Linear(self.hidden_dim, self.output_dim)
+
+    def forward_mlp(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[-1] != self.input_dim:
+            raise ValueError(f"predictor input dim must be {self.input_dim}, got {x.shape[-1]}")
+        return self.fc_out(self.relu(self.fc_in(x)))
 
     def forward_step(self, embedding: torch.Tensor, command_norm: torch.Tensor) -> torch.Tensor:
+        """
+        One autoregressive predictor step (plan §9.2).
+
+        Inputs: z_current [B, D] and u_j [B, 1] (normalized scalar control).
+        """
         if command_norm.ndim == 1:
             command_norm = command_norm.unsqueeze(-1)
         if command_norm.ndim == 2 and command_norm.shape[-1] != self.command_dim:
             command_norm = command_norm.view(command_norm.shape[0], self.command_dim)
         x = torch.cat([embedding, command_norm], dim=-1)
-        return self.net(x)
+        if x.shape[-1] != self.input_dim:
+            raise ValueError(f"predictor input dim must be {self.input_dim}, got {x.shape[-1]}")
+        return self.forward_mlp(x)
 
     def forward(
         self,
@@ -41,17 +74,28 @@ class Predictor(nn.Module):
         horizon: int | None = None,
     ) -> torch.Tensor:
         """
-        Autoregressive prediction over Kp steps.
+        Autoregressive prediction over Kp steps (plan §9.1).
 
         commands_norm: [B, Kp] or [B, Kp, 1]
-        returns: [B, Kp, D]
+        returns: [B, Kp, D] with z̃_{k+1}, ..., z̃_{k+Kp}
         """
         if commands_norm.ndim == 2:
             commands_norm = commands_norm.unsqueeze(-1)
         kp = commands_norm.shape[1] if horizon is None else int(horizon)
-        z = embedding
-        preds = []
-        for t in range(kp):
-            z = self.forward_step(z, commands_norm[:, t])
-            preds.append(z)
+        z_current = embedding
+        preds: list[torch.Tensor] = []
+        for j in range(kp):
+            z_next = self.forward_step(z_current, commands_norm[:, j])
+            preds.append(z_next)
+            z_current = z_next
         return torch.stack(preds, dim=1)
+
+    def architecture_summary(self) -> dict[str, int | str]:
+        return {
+            "input_dim": self.input_dim,
+            "hidden_dim": self.hidden_dim,
+            "output_dim": self.output_dim,
+            "stack": "Linear-1024-ReLU-Linear-256",
+            "autoregressive": True,
+            "inputs": "concat(embedding, command)",
+        }

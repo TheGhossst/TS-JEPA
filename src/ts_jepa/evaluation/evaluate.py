@@ -19,7 +19,112 @@ from ts_jepa.evaluation.metrics import (
     summarize_scores,
 )
 from ts_jepa.inference.infer import FrozenRuntimeController
+from ts_jepa.models.predictor_command_resolution import (
+    load_predictor_command_resolution,
+    select_predictor_conditioning_commands,
+)
 from ts_jepa.wireless.scheduler import ChannelAwareScheduler
+
+
+def _is_finite(value: Any) -> bool:
+    try:
+        return bool(np.isfinite(float(value)))
+    except (TypeError, ValueError):
+        return False
+
+
+@torch.no_grad()
+def evaluate_embedding_tsne(
+    config: dict[str, Any],
+    controller: FrozenRuntimeController,
+    data_root: Path | None = None,
+    max_samples: int | None = None,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """
+    Plan §16.1: t-SNE diagnostic on context-encoder embeddings from JEPA test trajectories.
+    """
+    from sklearn.manifold import TSNE
+
+    root = data_root or (project_root(config) / config["paths"]["data_root"])
+    normalizer = load_command_normalizer(config, data_root=root)
+    test_dir = root / "trajectories" / "jepa" / "test"
+    dataset = TrajectoryDataset(test_dir, config, normalizer, training=False)
+    limit = int(max_samples or config.get("evaluation", {}).get("tsne_max_samples", 500))
+    device = controller.device
+    jepa = controller.jepa
+
+    embeddings: list[np.ndarray] = []
+    cart_positions: list[float] = []
+    rng = np.random.default_rng(seed)
+    indices = np.arange(len(dataset))
+    if len(indices) > limit:
+        indices = rng.choice(indices, size=limit, replace=False)
+    for idx in indices:
+        sample = dataset[int(idx)]
+        context = sample["context"].unsqueeze(0).to(device)
+        z = jepa.encode_context(context).cpu().numpy().reshape(-1)
+        embeddings.append(z)
+        file_idx, time_index = dataset.index_map[int(idx)]
+        with np.load(dataset.files[file_idx]) as data:
+            cart_positions.append(float(np.asarray(data["states"])[time_index, 0]))
+
+    if not embeddings:
+        return {
+            "num_samples": 0,
+            "coords": [],
+            "cart_positions": [],
+            "perplexity": None,
+            "seed": seed,
+            "split": "jepa_test_untouched",
+        }
+
+    matrix = np.stack(embeddings, axis=0)
+    perplexity = float(min(30.0, max(5.0, (matrix.shape[0] - 1) / 3.0)))
+    tsne = TSNE(n_components=2, perplexity=perplexity, random_state=seed, init="pca", learning_rate="auto")
+    coords = tsne.fit_transform(matrix)
+    return {
+        "num_samples": int(matrix.shape[0]),
+        "coords": coords.tolist(),
+        "cart_positions": cart_positions,
+        "perplexity": perplexity,
+        "seed": seed,
+        "split": "jepa_test_untouched",
+    }
+
+
+def validate_baseline(report: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    """
+    Plan §16: mandatory baseline checks before wireless evaluation.
+    Records pass/fail per check; wireless is allowed only when all checks pass.
+    """
+    kp = int(config["ts_jepa"]["prediction_horizon"]["Kp"])
+    nmae_report = report.get("prediction_horizon_nmae") or {}
+    control = report.get("control") or {}
+    comm = report.get("communication_bits") or {}
+    tsne_report = report.get("embedding_tsne") or {}
+
+    horizon_keys = {str(h) for h in range(1, kp + 1)}
+    nmae_by_h = nmae_report.get("nmae_by_horizon") or {}
+    checks = {
+        "embedding_tsne": int(tsne_report.get("num_samples") or 0) > 0,
+        "nmae_finite": _is_finite(nmae_report.get("nmae")),
+        "horizon_nmae_complete": horizon_keys.issubset(set(nmae_by_h.keys()))
+        and all(_is_finite(nmae_by_h[k]) for k in horizon_keys),
+        "control_score_finite": _is_finite(control.get("mean")),
+        "communication_bits": _is_finite(comm.get("embedding_bits")) and _is_finite(comm.get("rgb_bits")),
+        "jepa_test_loss_recorded": report.get("test_losses", {}).get("jepa", {}).get("best_test_loss") is not None,
+        "actor_test_loss_recorded": report.get("test_losses", {}).get("semantic_actor", {}).get("best_test_loss")
+        is not None,
+    }
+    passed = all(checks.values())
+    resolution = load_predictor_command_resolution(config)
+    return {
+        "passed": passed,
+        "checks": checks,
+        "wireless_allowed": passed,
+        "predictor_command_resolution": resolution.to_dict(),
+    }
 
 
 def evaluate_closed_loop(
@@ -115,6 +220,7 @@ def evaluate_prediction_horizon_nmae(
     jepa = controller.jepa
     actor = controller.actor
     kp = int(config["ts_jepa"]["prediction_horizon"]["Kp"])
+    resolution = jepa.command_resolution
 
     pred_by_h = {h: [] for h in range(1, kp + 1)}
     tgt_by_h = {h: [] for h in range(1, kp + 1)}
@@ -123,10 +229,10 @@ def evaluate_prediction_horizon_nmae(
 
     for batch in loader:
         context = batch["context"].to(device)
-        teacher_norm = batch["teacher_commands_norm"].to(device)
+        conditioning_norm = select_predictor_conditioning_commands(batch, resolution).to(device)
         teacher_phys = batch["teacher_commands"].cpu().numpy()
         z = jepa.encode_context(context)
-        z_pred = jepa.predict(z, teacher_norm)  # [B, Kp, D]
+        z_pred = jepa.predict(z, conditioning_norm)  # [B, Kp, D]
         b = z_pred.shape[0]
         u_norm = actor(z_pred.reshape(b * kp, -1)).reshape(b, kp)
         u_phys = normalizer.denormalize(u_norm.cpu().numpy())
@@ -156,7 +262,7 @@ def evaluate_prediction_horizon_nmae(
         "kp": kp,
         "split": "jepa_test_untouched",
         "num_values": int(pred.size),
-        "conditioning": "trajectory_teacher_commands",
+        "predictor_command_resolution": resolution.to_dict(),
     }
 
 
@@ -240,7 +346,15 @@ def baseline_report(
     config: dict[str, Any],
     controller: FrozenRuntimeController,
     data_root: Path | None = None,
+    *,
+    include_wireless: bool = False,
 ) -> dict[str, Any]:
+    """
+    Paper-faithful baseline evaluation (plan §16).
+
+    Wireless scheduling (plan §17) is excluded by default until baseline validation passes.
+    Pass include_wireless=True only after validate_baseline()['passed'] is True.
+    """
     reps = int(config["evaluation"]["repetitions"])
     scores = []
     for r in range(reps):
@@ -257,6 +371,7 @@ def baseline_report(
         ),
     }
     nmae_report = evaluate_prediction_horizon_nmae(config, controller, data_root=data_root)
+    tsne_report = evaluate_embedding_tsne(config, controller, data_root=data_root)
 
     runs_root = project_root(config) / config["paths"]["runs_root"]
     test_losses = {
@@ -268,19 +383,25 @@ def baseline_report(
         ),
     }
 
-    wireless = {}
-    for policy in ("channel_aware", "round_robin", "opportunistic"):
-        wireless[policy] = {}
-        for snr in config["wireless"]["snr_targets_db"]:
-            wireless[policy][snr] = evaluate_with_scheduler(
-                config, controller, policy=policy, snr_db=float(snr), seed=7
-            )
-    return {
+    report: dict[str, Any] = {
         "control": summarize_scores(scores),
         "prediction_horizon_nmae": nmae_report,
+        "embedding_tsne": tsne_report,
         "test_losses": test_losses,
         "communication_bits": bits,
-        "wireless": {
+        "predictor_command_resolution": load_predictor_command_resolution(config).to_dict(),
+    }
+    report["baseline_validation"] = validate_baseline(report, config)
+
+    wireless: dict[str, Any] = {}
+    if include_wireless and report["baseline_validation"]["wireless_allowed"]:
+        for policy in ("channel_aware", "round_robin", "opportunistic"):
+            wireless[policy] = {}
+            for snr in config["wireless"]["snr_targets_db"]:
+                wireless[policy][snr] = evaluate_with_scheduler(
+                    config, controller, policy=policy, snr_db=float(snr), seed=7
+                )
+        report["wireless"] = {
             p: {
                 str(snr): {
                     "mean_control_score": wireless[p][snr]["mean_control_score"],
@@ -289,8 +410,14 @@ def baseline_report(
                 for snr in config["wireless"]["snr_targets_db"]
             }
             for p in wireless
-        },
-    }
+        }
+    elif include_wireless:
+        report["wireless"] = {
+            "skipped": True,
+            "reason": "baseline_validation_failed",
+            "checks": report["baseline_validation"]["checks"],
+        }
+    return report
 
 
 def write_evaluation_artifacts(
@@ -298,9 +425,9 @@ def write_evaluation_artifacts(
     out_dir: Path | str,
 ) -> dict[str, str]:
     """
-    Persist baseline_report.json plus NMAE / wireless plots and side JSON files.
+    Persist baseline_report.json plus NMAE / t-SNE / wireless plots and side JSON files.
     """
-    from ts_jepa.evaluation.plotting import plot_nmae_by_horizon, plot_wireless_control_scores
+    from ts_jepa.evaluation.plotting import plot_embedding_tsne, plot_nmae_by_horizon, plot_wireless_control_scores
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -311,6 +438,12 @@ def write_evaluation_artifacts(
         json.dump(report, handle, indent=2)
     paths["baseline_report"] = str(report_path)
 
+    validation = report.get("baseline_validation") or {}
+    validation_json = out_dir / "baseline_validation.json"
+    with validation_json.open("w", encoding="utf-8") as handle:
+        json.dump(validation, handle, indent=2)
+    paths["baseline_validation"] = str(validation_json)
+
     nmae_report = report.get("prediction_horizon_nmae") or {}
     nmae_json = out_dir / "nmae_report.json"
     with nmae_json.open("w", encoding="utf-8") as handle:
@@ -320,12 +453,22 @@ def write_evaluation_artifacts(
     if nmae_report.get("nmae_by_horizon"):
         paths["nmae_plot"] = str(plot_nmae_by_horizon(nmae_report, out_dir / "nmae_by_horizon.png"))
 
+    tsne_report = report.get("embedding_tsne") or {}
+    tsne_json = out_dir / "embedding_tsne.json"
+    with tsne_json.open("w", encoding="utf-8") as handle:
+        json.dump(tsne_report, handle, indent=2)
+    paths["embedding_tsne"] = str(tsne_json)
+    if int(tsne_report.get("num_samples") or 0) > 0:
+        paths["embedding_tsne_plot"] = str(
+            plot_embedding_tsne(tsne_report, out_dir / "embedding_tsne.png")
+        )
+
     wireless = report.get("wireless") or {}
-    wireless_json = out_dir / "wireless_report.json"
-    with wireless_json.open("w", encoding="utf-8") as handle:
-        json.dump(wireless, handle, indent=2)
-    paths["wireless_report"] = str(wireless_json)
-    if wireless:
+    if wireless and not wireless.get("skipped"):
+        wireless_json = out_dir / "wireless_report.json"
+        with wireless_json.open("w", encoding="utf-8") as handle:
+            json.dump(wireless, handle, indent=2)
+        paths["wireless_report"] = str(wireless_json)
         paths["wireless_plot"] = str(
             plot_wireless_control_scores(wireless, out_dir / "wireless_control_scores.png")
         )

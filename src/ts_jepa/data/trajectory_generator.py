@@ -7,32 +7,75 @@ import numpy as np
 
 from ts_jepa.config import project_root
 from ts_jepa.control.dp_teacher import DPControlTeacher
-from ts_jepa.env.cartpole_ode import CartPoleParams
 from ts_jepa.env.cartpole_rgb import InvertedCartPoleEnv
+from ts_jepa.env.factory import build_inverted_cartpole_env
+
+# Plan §4 dataset layout (D_s = JEPA, D_a = semantic actor).
+PLAN_DATASET_SPLITS: tuple[tuple[str, str, str, str], ...] = (
+    ("D_s", "jepa", "ts_jepa", "train"),
+    ("D_s", "jepa", "ts_jepa", "test"),
+    ("D_a", "actor", "semantic_actor", "train"),
+    ("D_a", "actor", "semantic_actor", "test"),
+)
+
+CONTROL_TEACHER_TYPE = "dp_nonlinear"
+
+
+class UniformRandomControlTeacher:
+    """
+    Anti-pattern baseline for plan §4.1 verification only.
+
+    DO NOT use for dataset generation — plan forbids independent Uniform(-20, 20) actions.
+    """
+
+    def __init__(self, force_min: float = -20.0, force_max: float = 20.0, seed: int = 0) -> None:
+        self.force_min = float(force_min)
+        self.force_max = float(force_max)
+        self._rng = np.random.default_rng(int(seed))
+
+    def act(self, state: np.ndarray) -> float:  # noqa: ARG002
+        return float(self._rng.uniform(self.force_min, self.force_max))
+
+
+def assert_plan_simulation_timing(config: dict[str, Any]) -> None:
+    """Plan §4: τ_o = 1 ms sampling period."""
+    sim = config["simulation"]
+    tau_ms = float(sim["sampling_interval_ms"])
+    dt = float(sim["dt"])
+    if abs(dt - tau_ms / 1000.0) > 1e-12:
+        raise ValueError(
+            f"simulation.dt ({dt}) must equal sampling_interval_ms/1000 ({tau_ms / 1000.0}) per plan §4"
+        )
+
+
+def assert_plan_dataset_counts(config: dict[str, Any]) -> None:
+    """Plan §4: D_s 200/40, D_a 100/20, 100 steps per trajectory."""
+    steps = int(config["simulation"]["trajectory_steps"])
+    if steps != 100:
+        raise ValueError(f"simulation.trajectory_steps must be 100 per plan §4, got {steps}")
+    jepa = config["ts_jepa"]["dataset"]
+    actor = config["semantic_actor"]["dataset"]
+    expected = {
+        ("jepa", "train"): 200,
+        ("jepa", "test"): 40,
+        ("actor", "train"): 100,
+        ("actor", "test"): 20,
+    }
+    actual = {
+        ("jepa", "train"): int(jepa["train_trajectories"]),
+        ("jepa", "test"): int(jepa["test_trajectories"]),
+        ("actor", "train"): int(actor["train_trajectories"]),
+        ("actor", "test"): int(actor["test_trajectories"]),
+    }
+    if actual != expected:
+        raise ValueError(f"Plan §4 dataset counts mismatch: expected {expected}, got {actual}")
 
 
 def build_env_and_teacher(config: dict[str, Any]) -> tuple[InvertedCartPoleEnv, DPControlTeacher]:
+    assert_plan_simulation_timing(config)
     sim = config["simulation"]
     teacher_cfg = config["control_teacher"]
-    phys = sim.get("physics", {})
-    params = CartPoleParams(
-        cart_mass=float(phys.get("cart_mass", 1.0)),
-        pole_mass=float(phys.get("pole_mass", 0.1)),
-        pole_length=float(phys.get("pole_length", 0.5)),
-        gravity=float(phys.get("gravity", 9.81)),
-        track_limit=float(phys.get("track_limit", 2.4)),
-    )
-    env = InvertedCartPoleEnv(
-        render_height=sim["render_height"],
-        render_width=sim["render_width"],
-        dt=sim["dt"],
-        force_min=sim["control_min_N"],
-        force_max=sim["control_max_N"],
-        desired_state=sim["desired_state"],
-        params=params,
-        process_noise_std=float(sim.get("process_noise_std", 0.0)),
-        init_noise=float(sim.get("init_noise", 0.05)),
-    )
+    env = build_inverted_cartpole_env(config)
     teacher = DPControlTeacher(
         env=env,
         grid=teacher_cfg["grid"],
@@ -54,7 +97,25 @@ def generate_trajectory(
     steps: int,
     seed: int,
 ) -> dict[str, np.ndarray]:
+    """
+    Plan §4.1 loop per step k:
+      state_k / frame_k → DP teacher → u*_k → env.step → state_{k+1}
+    """
     return env.rollout(teacher, steps=steps, seed=seed)
+
+
+def _trajectory_metadata(config: dict[str, Any], split: str, trajectory_index: int, seed: int) -> dict[str, Any]:
+    sim = config["simulation"]
+    return {
+        "split": np.asarray(split),
+        "seed": np.asarray(seed),
+        "trajectory_index": np.asarray(trajectory_index),
+        "control_teacher": np.asarray(CONTROL_TEACHER_TYPE),
+        "sampling_interval_ms": np.asarray(float(sim["sampling_interval_ms"])),
+        "dt": np.asarray(float(sim["dt"])),
+        "render_height": np.asarray(int(sim["render_height"])),
+        "render_width": np.asarray(int(sim["render_width"])),
+    }
 
 
 def generate_dataset_split(
@@ -68,7 +129,7 @@ def generate_dataset_split(
 ) -> None:
     if env is None or teacher is None:
         env, teacher = build_env_and_teacher(config)
-    steps = config["simulation"]["trajectory_steps"]
+    steps = int(config["simulation"]["trajectory_steps"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for offset in range(count):
@@ -76,18 +137,28 @@ def generate_dataset_split(
         seed = 10_000 + trajectory_index
         trajectory = generate_trajectory(env, teacher, steps=steps, seed=seed)
         output_path = output_dir / f"{trajectory_index:05d}.npz"
+        meta = _trajectory_metadata(config, split, trajectory_index, seed)
         np.savez_compressed(
             output_path,
             frames=trajectory["frames"],
             commands=trajectory["commands"],
             states=trajectory["states"],
-            split=np.asarray(split),
-            seed=np.asarray(seed),
-            trajectory_index=np.asarray(trajectory_index),
+            **meta,
         )
 
 
-def generate_all_trajectories(config: dict[str, Any], data_root: Path | None = None) -> Path:
+def generate_all_trajectories(
+    config: dict[str, Any],
+    data_root: Path | None = None,
+    *,
+    run_sanity_check: bool = True,
+) -> Path:
+    """
+    Generate plan §4 datasets D_s (JEPA) and D_a (semantic actor).
+
+    Raises RuntimeError if post-generation sanity checks fail.
+    """
+    assert_plan_dataset_counts(config)
     root = data_root or (project_root(config) / config["paths"]["data_root"])
     jepa_cfg = config["ts_jepa"]["dataset"]
     actor_cfg = config["semantic_actor"]["dataset"]
@@ -117,4 +188,11 @@ def generate_all_trajectories(config: dict[str, Any], data_root: Path | None = N
         env,
         teacher,
     )
+
+    if run_sanity_check:
+        from ts_jepa.data.dataset_sanity import sanity_check_trajectory_root
+
+        report = sanity_check_trajectory_root(config, root, fit_normalizer=True)
+        if not report["overall_pass"]:
+            raise RuntimeError(f"Plan §4 trajectory sanity check failed: {report['pass']}")
     return root

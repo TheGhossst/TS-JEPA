@@ -5,8 +5,20 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from ts_jepa.models.ema import clone_encoder, ema_update
+from ts_jepa.models.ema import (
+    assert_target_initialized_from_context,
+    clone_encoder,
+    ema_update,
+    initialize_target_from_context,
+)
 from ts_jepa.models.encoder import ContextEncoder
+from ts_jepa.models.encoder_plan import assert_plan_encoder_config
+from ts_jepa.models.predictor_plan import assert_plan_predictor_config
+from ts_jepa.models.predictor_command_resolution import (
+    PredictorCommandResolution,
+    assert_plan_predictor_command_resolution,
+    load_predictor_command_resolution,
+)
 from ts_jepa.models.predictor import Predictor
 
 
@@ -15,6 +27,9 @@ class TSJEPA(nn.Module):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__()
+        assert_plan_encoder_config(config)
+        assert_plan_predictor_config(config)
+        assert_plan_predictor_command_resolution(config)
         inp = config["input"]
         enc_cfg = config["ts_jepa"]["encoder"]
         pred_cfg = config["ts_jepa"]["predictor"]
@@ -26,12 +41,16 @@ class TSJEPA(nn.Module):
             embedding_dim=embedding_dim,
             blocks_per_stage=int(enc_cfg.get("blocks_per_stage", 2)),
         )
-        self.target_encoder = clone_encoder(self.context_encoder)
+        self.target_encoder = initialize_target_from_context(self.context_encoder)
+        assert_target_initialized_from_context(self.context_encoder, self.target_encoder)
         self.predictor = Predictor(
             embedding_dim=embedding_dim,
             command_dim=1,
             hidden_dim=int(pred_cfg["hidden_dim"]),
+            output_dim=int(pred_cfg["output_dim"]),
         )
+        self.command_source = str(pred_cfg.get("command_source", "teacher_dp"))
+        self.command_resolution: PredictorCommandResolution = load_predictor_command_resolution(config)
         self.ema_decay = float(config["ts_jepa"]["target_encoder"]["ema_decay"])
         self.kp = int(config["ts_jepa"]["prediction_horizon"]["Kp"])
 
@@ -41,11 +60,9 @@ class TSJEPA(nn.Module):
     @torch.no_grad()
     def encode_targets(self, future_frames: torch.Tensor, chunk_size: int = 256) -> torch.Tensor:
         """
-        future_frames: [B, Kp, C_kappa, H, W] → [B, Kp, D].
+        Plan §7: target encoder forward with stop-gradient.
 
-        Chunked forward is an IMPLEMENTATION CHOICE for GPU memory. Target encoder
-        runs in eval/no-grad, so BatchNorm uses running stats and chunking does not
-        change outputs vs a single mega-batch.
+        future_frames: [B, Kp, C_kappa, H, W] → [B, Kp, D].
         """
         b, kp, c, h, w = future_frames.shape
         flat = future_frames.reshape(b * kp, c, h, w)
@@ -55,8 +72,14 @@ class TSJEPA(nn.Module):
         emb = torch.cat(chunks, dim=0)
         return emb.view(b, kp, -1)
 
-    def predict(self, embedding: torch.Tensor, commands_norm: torch.Tensor) -> torch.Tensor:
-        return self.predictor(embedding, commands_norm, horizon=self.kp)
+    def predict(self, embedding: torch.Tensor, commands_norm: torch.Tensor, horizon: int | None = None) -> torch.Tensor:
+        """
+        Autoregressive latent prediction conditioned on `commands_norm`.
+
+        Plan §10: during baseline training these are DP teacher trajectory commands
+        (command_source=teacher_dp), not claimed to be paper ũ until §10 is resolved.
+        """
+        return self.predictor(embedding, commands_norm, horizon=horizon or self.kp)
 
     def ema_step(self) -> None:
         ema_update(self.target_encoder, self.context_encoder, decay=self.ema_decay)
