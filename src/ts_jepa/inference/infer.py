@@ -79,11 +79,7 @@ class FrozenRuntimeController:
         actor_payload = torch.load(actor_ckpt, map_location=device, weights_only=False)
         jepa = TSJEPA(config)
         jepa.load_state_dict(jepa_payload["model"])
-        actor = SemanticActor(
-            embedding_dim=int(config["ts_jepa"]["encoder"]["embedding_dim"]),
-            hidden_dims=tuple(config["semantic_actor"]["architecture"]["hidden_dims"]),
-            dropout=float(config["semantic_actor"]["architecture"]["dropout"]),
-        )
+        actor = SemanticActor.from_config(config)
         actor.load_state_dict(actor_payload["actor"])
         normalizer = CommandNormalizer.from_dict(
             actor_payload.get("normalizer") or jepa_payload["normalizer"]

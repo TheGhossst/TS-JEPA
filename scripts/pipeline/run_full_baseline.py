@@ -31,6 +31,10 @@ from ts_jepa.evaluation.evaluate import baseline_report, write_evaluation_artifa
 from ts_jepa.inference.infer import FrozenRuntimeController
 from ts_jepa.training.jepa_procedure import assert_plan_jepa_procedure_config
 from ts_jepa.training.jepa_training_plan import assert_plan_jepa_training_config
+from ts_jepa.plan.actor import (
+    assert_plan_semantic_actor_config,
+    assert_plan_semantic_actor_training_config,
+)
 from ts_jepa.training.train_actor import train_semantic_actor_repetitions
 from ts_jepa.training.train_jepa import train_ts_jepa_repetitions
 from ts_jepa.evaluation.checkpoints import resolve_run_checkpoint
@@ -78,6 +82,9 @@ def main() -> None:
     assert_plan_jepa_loss_config(config)
     assert_plan_jepa_training_config(config)
     assert_plan_jepa_procedure_config(config)
+    assert_plan_semantic_actor_config(config)
+    if args.actor_epochs is None:
+        assert_plan_semantic_actor_training_config(config)
     root = project_root(config)
     data_root = root / config["paths"]["data_root"]
     runs_root = root / config["paths"]["runs_root"]

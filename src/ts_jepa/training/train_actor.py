@@ -16,6 +16,7 @@ from ts_jepa.device import select_device
 from ts_jepa.evaluation.checkpoints import resolve_run_checkpoint
 from ts_jepa.models.actor import SemanticActor
 from ts_jepa.models.ts_jepa import TSJEPA
+from ts_jepa.plan.actor import PLAN_SEMANTIC_ACTOR
 from ts_jepa.runtime import (
     CUDAPrefetcher,
     DataLoaderStallError,
@@ -36,6 +37,27 @@ def _set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def _assert_encoder_frozen(jepa: TSJEPA) -> None:
+    """Plan §14 / §15: TS-JEPA encoder must be frozen; only Cε is optimized."""
+    trainable = [n for n, p in jepa.named_parameters() if p.requires_grad]
+    if trainable:
+        raise RuntimeError(
+            "plan §14 requires frozen TS-JEPA during actor training; "
+            f"trainable JEPA params remain: {trainable[:8]}"
+        )
+
+
+def _assert_optimizer_only_actor(optimizer: torch.optim.Optimizer, actor: SemanticActor) -> None:
+    """Plan §15: optimize only Cε."""
+    actor_ids = {id(p) for p in actor.parameters()}
+    opt_ids = {id(p) for group in optimizer.param_groups for p in group["params"]}
+    if opt_ids != actor_ids:
+        raise RuntimeError(
+            "plan §15 requires optimizer to cover exactly SemanticActor parameters "
+            f"(actor={len(actor_ids)}, optimizer={len(opt_ids)})"
+        )
 
 
 def _split_train_val_actor(dataset: ActorEmbeddingDataset, val_fraction: float) -> tuple[Subset, Subset]:
@@ -160,10 +182,12 @@ def _train_semantic_actor_body(
     jepa.eval()
     for p in jepa.parameters():
         p.requires_grad_(False)
+    _assert_encoder_frozen(jepa)
 
     normalizer = load_command_normalizer(config, data_root=root)
     train_dir = root / "trajectories" / "actor" / "train"
     test_dir = root / "trajectories" / "actor" / "test"
+    # Plan §15: x → frozen Ψθ → z (cached here) → Cε → ũ
     train_full = ActorEmbeddingDataset(train_dir, config, normalizer, jepa.context_encoder, device, training=True)
     test_ds = ActorEmbeddingDataset(test_dir, config, normalizer, jepa.context_encoder, device, training=False)
 
@@ -171,18 +195,29 @@ def _train_semantic_actor_body(
     train_ds, val_ds = _split_train_val_actor(train_full, val_fraction)
 
     opt_cfg = config["semantic_actor"]["optimizer"]
-    actor_cfg = config["semantic_actor"]["architecture"]
-    actor = SemanticActor(
-        embedding_dim=int(config["ts_jepa"]["encoder"]["embedding_dim"]),
-        hidden_dims=tuple(actor_cfg["hidden_dims"]),
-        dropout=float(actor_cfg["dropout"]),
-    ).to(device)
+    actor = SemanticActor.from_config(config).to(device)
+    if (
+        int(config["ts_jepa"]["encoder"]["embedding_dim"]) == PLAN_SEMANTIC_ACTOR["input_dim"]
+        and list(config["semantic_actor"]["architecture"]["hidden_dims"])
+        == PLAN_SEMANTIC_ACTOR["hidden_dims"]
+    ):
+        actor.assert_plan_architecture()
 
+    if str(opt_cfg.get("type", "AdamW")) != "AdamW":
+        raise ValueError(
+            f"plan §15 requires AdamW for the semantic actor; got {opt_cfg.get('type')!r}"
+        )
     optimizer = torch.optim.AdamW(
         actor.parameters(),
         lr=float(opt_cfg["learning_rate"]),
         weight_decay=float(opt_cfg.get("weight_decay", 0.01)),
     )
+    _assert_optimizer_only_actor(optimizer, actor)
+    # Plan §14: L_actor = MSE(ũ, u) — trained in normalized command domain (IC).
+    if str(config["semantic_actor"].get("loss", "MSE")) != "MSE":
+        raise ValueError(
+            f"plan §14 requires MSE actor loss; got {config['semantic_actor'].get('loss')!r}"
+        )
     criterion = nn.MSELoss()
     batch_size = int(opt_cfg["batch_size"])
     train_loader = make_dataloader(

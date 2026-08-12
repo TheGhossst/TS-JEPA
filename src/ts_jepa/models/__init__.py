@@ -1,6 +1,12 @@
 """Neural models for TS-JEPA."""
 
 from ts_jepa.models.actor import SemanticActor
+from ts_jepa.models.actor_plan import (
+    PLAN_SEMANTIC_ACTOR,
+    PLAN_SEMANTIC_ACTOR_TRAINING,
+    assert_plan_semantic_actor_config,
+    assert_plan_semantic_actor_training_config,
+)
 from ts_jepa.models.ema import (
     assert_target_initialized_from_context,
     clone_encoder,
@@ -26,6 +32,10 @@ __all__ = [
     "assert_plan_predictor_command_resolution",
     "load_predictor_command_resolution",
     "SemanticActor",
+    "PLAN_SEMANTIC_ACTOR",
+    "PLAN_SEMANTIC_ACTOR_TRAINING",
+    "assert_plan_semantic_actor_config",
+    "assert_plan_semantic_actor_training_config",
     "TSJEPA",
     "PLAN_ENCODER",
     "PLAN_TARGET_ENCODER",

@@ -1,5 +1,11 @@
 """Paper plan specifications and config assertions (docs/plan.md)."""
 
+from ts_jepa.plan.actor import (
+    PLAN_SEMANTIC_ACTOR,
+    PLAN_SEMANTIC_ACTOR_TRAINING,
+    assert_plan_semantic_actor_config,
+    assert_plan_semantic_actor_training_config,
+)
 from ts_jepa.plan.encoder import PLAN_ENCODER, PLAN_TARGET_ENCODER, assert_plan_encoder_config
 from ts_jepa.plan.environment import PLAN_ENVIRONMENT, assert_plan_environment_config
 from ts_jepa.plan.loss import PLAN_JEPA_LOSS, assert_plan_jepa_loss_config
@@ -23,6 +29,8 @@ __all__ = [
     "PLAN_JEPA_TRAINING",
     "PLAN_PREDICTOR",
     "PLAN_PREPROCESSING",
+    "PLAN_SEMANTIC_ACTOR",
+    "PLAN_SEMANTIC_ACTOR_TRAINING",
     "PLAN_TARGET_ENCODER",
     "PLAN_TEMPORAL",
     "TRAINING_PIPELINE_STAGES",
@@ -33,5 +41,7 @@ __all__ = [
     "assert_plan_jepa_training_config",
     "assert_plan_predictor_config",
     "assert_plan_preprocessing_config",
+    "assert_plan_semantic_actor_config",
+    "assert_plan_semantic_actor_training_config",
     "assert_plan_temporal_config",
 ]

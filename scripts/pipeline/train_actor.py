@@ -15,6 +15,10 @@ from ts_jepa.config import (
     project_root,
 )
 from ts_jepa.device import describe_device, select_device
+from ts_jepa.plan.actor import (
+    assert_plan_semantic_actor_config,
+    assert_plan_semantic_actor_training_config,
+)
 from ts_jepa.training.train_actor import train_semantic_actor, train_semantic_actor_repetitions
 
 
@@ -44,6 +48,10 @@ def main() -> None:
     )
     args = parser.parse_args()
     config = load_config(args.config)
+    assert_plan_semantic_actor_config(config)
+    # Full plan §15 table only when not using smoke epoch overrides.
+    if args.epochs is None:
+        assert_plan_semantic_actor_training_config(config)
     apply_cli_path_overrides(config, data_root=args.data_root, runs_root=args.runs_root)
     device = select_device(args.device)
     print(describe_device(device))
