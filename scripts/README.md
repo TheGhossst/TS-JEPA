@@ -63,6 +63,24 @@ python scripts/pipeline/train_jepa.py --config configs/ts_jepa_dp_fixed.yaml --d
 
 The 5-seed protocol skips seeds that already finished (final `last.pt` with `test_loss`). Completed seeds are not retrained unless you remove their run directory.
 
+### Semantic actor training (5 seeds × 300 epochs)
+
+Full 5-seed protocol (selects best validation MSE → `runs/semantic_actor_dp_fixed/best.pt`). Uses `runs/ts_jepa_dp_fixed/best.pt` unless `--jepa-checkpoint` is set:
+
+```powershell
+python scripts/pipeline/train_actor.py --config configs/ts_jepa_dp_fixed.yaml --device cuda
+```
+
+Single seed:
+
+```powershell
+python scripts/pipeline/train_actor.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --single-seed 0
+```
+
+```powershell
+python scripts/pipeline/train_actor.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --single-seed 0 --jepa-checkpoint runs/ts_jepa_dp_fixed/best.pt
+```
+
 ### Partial / resume pipeline
 
 ```powershell

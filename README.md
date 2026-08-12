@@ -81,10 +81,26 @@ Or use the default checkpoint path for that seed:
 python scripts/pipeline/train_jepa.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --single-seed 2 --resume
 ```
 
-**4. Train semantic actor — 5 seeds × 300 epochs (plan §14+)**
+**4. Train semantic actor — 5 seeds × 300 epochs (plan §14–§15)**
+
+Requires a trained JEPA checkpoint (`runs/ts_jepa_dp_fixed/best.pt` by default).
 
 ```powershell
 python scripts/pipeline/train_actor.py --config configs/ts_jepa_dp_fixed.yaml --device cuda
+```
+
+Outputs per seed under `runs/semantic_actor_dp_fixed/seed_{0..4}/` plus `runs/semantic_actor_dp_fixed/best.pt` and `repetition_summary.json`.
+
+Train a single seed only:
+
+```powershell
+python scripts/pipeline/train_actor.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --single-seed 0
+```
+
+Optionally point at an explicit JEPA checkpoint:
+
+```powershell
+python scripts/pipeline/train_actor.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --single-seed 0 --jepa-checkpoint runs/ts_jepa_dp_fixed/best.pt
 ```
 
 **5. Evaluate (plan §16)**
