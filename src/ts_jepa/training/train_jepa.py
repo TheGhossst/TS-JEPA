@@ -28,6 +28,7 @@ from ts_jepa.runtime import (
     configure_training_runtime,
     format_exception,
     gpu_mem_str,
+    load_checkpoint,
     make_dataloader,
     reraise_cuda_context,
     save_checkpoint,
@@ -40,6 +41,136 @@ def _set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+_ENCODER_ARCH_KEYS = ("type", "widths", "embedding_dim", "blocks_per_stage", "batch_norm", "activation")
+_PREDICTOR_ARCH_KEYS = ("type", "hidden_dim", "output_dim", "activation", "autoregressive")
+_PREDICTOR_COMMAND_RESOLUTION_KEYS = ("selected_source", "paper_exact")
+
+
+def _optimizer_momentum(opt_cfg: dict[str, Any]) -> float:
+    return float(opt_cfg.get("momentum", 0.0))
+
+
+def _optimizer_batch_sizes(opt_cfg: dict[str, Any]) -> tuple[int, int]:
+    effective = int(opt_cfg["batch_size"])
+    micro = int(opt_cfg.get("microbatch_size", effective))
+    return effective, micro
+
+
+def validate_checkpoint_config_compatibility(
+    checkpoint_config: dict[str, Any],
+    current_config: dict[str, Any],
+) -> None:
+    """Fail clearly when a checkpoint cannot be resumed with the current config."""
+    ckpt_ts = checkpoint_config["ts_jepa"]
+    cur_ts = current_config["ts_jepa"]
+    ckpt_opt = ckpt_ts["optimizer"]
+    cur_opt = cur_ts["optimizer"]
+    ckpt_effective_bs, ckpt_micro_bs = _optimizer_batch_sizes(ckpt_opt)
+    cur_effective_bs, cur_micro_bs = _optimizer_batch_sizes(cur_opt)
+    ckpt_cmd = ckpt_ts.get("predictor_command_resolution", {})
+    cur_cmd = cur_ts.get("predictor_command_resolution", {})
+    scalar_checks = [
+        ("Kp", ckpt_ts["prediction_horizon"]["Kp"], cur_ts["prediction_horizon"]["Kp"]),
+        ("kappa", checkpoint_config["input"]["kappa"], current_config["input"]["kappa"]),
+        ("embedding_dim", ckpt_ts["encoder"]["embedding_dim"], cur_ts["encoder"]["embedding_dim"]),
+        ("optimizer type", ckpt_opt["type"], cur_opt["type"]),
+        ("learning_rate", ckpt_opt["learning_rate"], cur_opt["learning_rate"]),
+        ("weight_decay", ckpt_opt["weight_decay"], cur_opt["weight_decay"]),
+        ("optimizer momentum", _optimizer_momentum(ckpt_opt), _optimizer_momentum(cur_opt)),
+        ("lr_decay.factor", ckpt_ts["lr_decay"]["factor"], cur_ts["lr_decay"]["factor"]),
+        (
+            "lr_decay.interval_epochs",
+            ckpt_ts["lr_decay"]["interval_epochs"],
+            cur_ts["lr_decay"]["interval_epochs"],
+        ),
+        ("batch_size", ckpt_effective_bs, cur_effective_bs),
+        ("microbatch_size", ckpt_micro_bs, cur_micro_bs),
+        ("ema_decay", ckpt_ts["target_encoder"]["ema_decay"], cur_ts["target_encoder"]["ema_decay"]),
+    ]
+    mismatches = [f"{name}: checkpoint={a!r} current={b!r}" for name, a, b in scalar_checks if a != b]
+    for key in _PREDICTOR_COMMAND_RESOLUTION_KEYS:
+        ckpt_val = ckpt_cmd.get(key)
+        cur_val = cur_cmd.get(key)
+        if ckpt_val != cur_val:
+            mismatches.append(
+                f"predictor_command_resolution.{key}: checkpoint={ckpt_val!r} current={cur_val!r}"
+            )
+    for key in _ENCODER_ARCH_KEYS:
+        ckpt_val = ckpt_ts["encoder"].get(key)
+        cur_val = cur_ts["encoder"].get(key)
+        if ckpt_val != cur_val:
+            mismatches.append(f"encoder.{key}: checkpoint={ckpt_val!r} current={cur_val!r}")
+    for key in _PREDICTOR_ARCH_KEYS:
+        ckpt_val = ckpt_ts["predictor"].get(key)
+        cur_val = cur_ts["predictor"].get(key)
+        if ckpt_val != cur_val:
+            mismatches.append(f"predictor.{key}: checkpoint={ckpt_val!r} current={cur_val!r}")
+    if mismatches:
+        detail = "; ".join(mismatches)
+        raise ValueError(f"Checkpoint config incompatible with current config: {detail}")
+
+
+def _resumable_checkpoint_payload(
+    *,
+    model: TSJEPA,
+    optimizer: torch.optim.Optimizer,
+    config: dict[str, Any],
+    normalizer: Any,
+    resolution: Any,
+    epoch: int,
+    best_val: float,
+    best_epoch: int,
+    stale: int,
+    history: list[dict[str, float]],
+    seed: int,
+    best_state: dict[str, torch.Tensor] | None,
+    test_loss: float | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": state_dict_to_cpu(model.state_dict()),
+        "optimizer": optimizer.state_dict(),
+        "config": config,
+        "normalizer": normalizer.to_dict(),
+        "epoch": epoch,
+        "best_val": best_val,
+        "best_epoch": best_epoch,
+        "stale": stale,
+        "history": history,
+        "seed": seed,
+        "selection_split": "train_holdout_validation",
+        "predictor_command_resolution": resolution.to_dict(),
+    }
+    if best_state is not None:
+        payload["best_model"] = best_state
+    if test_loss is not None:
+        payload["test_loss"] = test_loss
+        payload["test_split"] = "jepa_test_untouched"
+    return payload
+
+
+def _seed_training_complete(run_dir: Path) -> bool:
+    """True when a seed finished training and wrote a final checkpoint."""
+    metrics_path = run_dir / "metrics.json"
+    last_path = run_dir / "last.pt"
+    if not metrics_path.is_file() or not last_path.is_file():
+        return False
+    checkpoint = load_checkpoint(last_path)
+    return "test_loss" in checkpoint
+
+
+def _load_completed_seed_result(run_dir: Path) -> dict[str, Any]:
+    metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+    return {
+        "best_val": metrics["best_val"],
+        "best_epoch": metrics["best_epoch"],
+        "test_loss": metrics["test_loss"],
+        "history": metrics["history"],
+        "runs_dir": str(run_dir),
+        "seed": metrics["seed"],
+        "checkpoint": str(run_dir / "best.pt"),
+    }
 
 
 def resolve_jepa_batching(opt_cfg: dict[str, Any]) -> tuple[int, int, int]:
@@ -129,6 +260,7 @@ def train_ts_jepa(
     data_root: Path | None = None,
     seed: int = 0,
     run_dir: Path | None = None,
+    resume_from: Path | None = None,
 ) -> dict[str, Any]:
     """
     Train one TS-JEPA seed.
@@ -136,10 +268,24 @@ def train_ts_jepa(
     Model selection uses validation carved from the train split only.
     The untouched JEPA test set is evaluated after training and never used for selection.
     Predictor conditioning uses the plan §10 documented candidate (see command_resolution).
+
+    When ``resume_from`` points to a resumable ``last.pt``, training continues from the
+    next epoch in the existing run directory without resetting optimizer or best metrics.
     """
     device = select_device(device)
-    _set_seed(seed)
+    if resume_from is not None:
+        resume_from = Path(resume_from)
+        checkpoint = load_checkpoint(resume_from)
+        validate_checkpoint_config_compatibility(checkpoint["config"], config)
+        ckpt_seed = int(checkpoint["seed"])
+        if seed != ckpt_seed:
+            raise ValueError(
+                f"Requested seed {seed} does not match checkpoint seed {ckpt_seed} in {resume_from}"
+            )
+        seed = ckpt_seed
+        run_dir = resume_from.parent
     configure_train_logging()
+    _set_seed(seed)
     configure_training_runtime(
         device,
         cudnn_benchmark=bool(config.get("runtime", {}).get("cudnn_benchmark", True)),
@@ -163,6 +309,7 @@ def train_ts_jepa(
         f"start device={device} GPU={gpu_mem_str(device)} "
         f"workers={runtime_cfg.get('num_workers', 'default')} "
         f"dataloader_timeout_s={runtime_cfg.get('dataloader_timeout_s', 120.0)}"
+        + (f" resume_from={resume_from}" if resume_from is not None else "")
     )
 
     try:
@@ -174,6 +321,7 @@ def train_ts_jepa(
             seed=seed,
             runs=runs,
             watchdog=watchdog,
+            resume_from=resume_from,
         )
     except Exception as exc:
         watchdog.log(f"FATAL {type(exc).__name__}: {exc}")
@@ -193,6 +341,7 @@ def _train_ts_jepa_body(
     seed: int,
     runs: Path,
     watchdog: TrainProgressWatchdog,
+    resume_from: Path | None = None,
 ) -> dict[str, Any]:
     root = data_root
     normalizer = fit_command_normalizer(config, data_root=root)
@@ -250,12 +399,50 @@ def _train_ts_jepa_body(
     epochs = int(max_epochs if max_epochs is not None else opt_cfg["epochs"])
     patience = int(config["ts_jepa"]["early_stopping"]["patience"])
     best_val = float("inf")
-    best_state = None
+    best_state: dict[str, torch.Tensor] | None = None
     best_epoch = 0
     stale = 0
     history: list[dict[str, float]] = []
+    start_epoch = 1
 
-    for epoch in range(1, epochs + 1):
+    if resume_from is not None:
+        checkpoint = load_checkpoint(resume_from)
+        if "optimizer" not in checkpoint:
+            raise ValueError(
+                f"Checkpoint at {resume_from} is not resumable (missing optimizer state). "
+                "Use a per-epoch last.pt written by the current trainer."
+            )
+        required = ("model", "epoch", "best_val", "best_epoch", "stale", "history", "config", "normalizer")
+        missing = [key for key in required if key not in checkpoint]
+        if missing:
+            raise ValueError(f"Checkpoint at {resume_from} is missing required resume fields: {missing}")
+        if int(checkpoint["seed"]) != seed:
+            raise ValueError(
+                f"Checkpoint seed {checkpoint['seed']!r} does not match requested seed {seed!r}"
+            )
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        start_epoch = int(checkpoint["epoch"]) + 1
+        best_val = float(checkpoint["best_val"])
+        best_epoch = int(checkpoint["best_epoch"])
+        stale = int(checkpoint["stale"])
+        history = list(checkpoint["history"])
+        best_state = checkpoint.get("best_model")
+        if best_state is None and (runs / "best.pt").is_file():
+            best_ckpt = load_checkpoint(runs / "best.pt")
+            best_state = best_ckpt["model"]
+        watchdog.log(
+            f"resumed from epoch={checkpoint['epoch']} -> start_epoch={start_epoch} "
+            f"best_val={best_val:.6f} best_epoch={best_epoch} stale={stale} "
+            f"lr={optimizer.param_groups[0]['lr']}"
+        )
+        if start_epoch > epochs:
+            watchdog.log(
+                f"checkpoint already completed epoch {checkpoint['epoch']} >= max_epochs={epochs}; "
+                "running final evaluation only"
+            )
+
+    for epoch in range(start_epoch, epochs + 1):
         model.context_encoder.train()
         model.predictor.train()
         model.target_encoder.eval()
@@ -393,6 +580,26 @@ def _train_ts_jepa_body(
             watchdog.log(f"early stop epoch={epoch} stale={stale}")
             break
 
+        watchdog.set_stage("checkpoint")
+        save_checkpoint(
+            runs / "last.pt",
+            _resumable_checkpoint_payload(
+                model=model,
+                optimizer=optimizer,
+                config=config,
+                normalizer=normalizer,
+                resolution=resolution,
+                epoch=epoch,
+                best_val=best_val,
+                best_epoch=best_epoch,
+                stale=stale,
+                history=history,
+                seed=seed,
+                best_state=best_state,
+            ),
+        )
+        watchdog.log(f"saved last.pt epoch={epoch}")
+
     if best_state is not None:
         model.load_state_dict(best_state)
 
@@ -402,19 +609,21 @@ def _train_ts_jepa_body(
         test_loss = evaluate_cosine_loss(model, test_loader, device)
     except Exception as exc:
         reraise_cuda_context(exc, where="jepa untouched test", device=device)
-    payload = {
-        "model": state_dict_to_cpu(model.state_dict()),
-        "config": config,
-        "normalizer": load_command_normalizer(config, data_root=root).to_dict(),
-        "history": history,
-        "best_val": best_val,
-        "best_epoch": best_epoch,
-        "test_loss": test_loss,
-        "seed": seed,
-        "selection_split": "train_holdout_validation",
-        "test_split": "jepa_test_untouched",
-        "predictor_command_resolution": resolution.to_dict(),
-    }
+    payload = _resumable_checkpoint_payload(
+        model=model,
+        optimizer=optimizer,
+        config=config,
+        normalizer=load_command_normalizer(config, data_root=root),
+        resolution=resolution,
+        epoch=history[-1]["epoch"] if history else 0,
+        best_val=best_val,
+        best_epoch=best_epoch,
+        stale=stale,
+        history=history,
+        seed=seed,
+        best_state=best_state,
+        test_loss=test_loss,
+    )
     save_checkpoint(runs / "last.pt", payload)
     with (runs / "metrics.json").open("w", encoding="utf-8") as handle:
         json.dump(
@@ -451,6 +660,8 @@ def train_ts_jepa_repetitions(
 ) -> dict[str, Any]:
     """
     Paper protocol: repeat the experiment, save each seed, report the best validation run.
+
+    Seeds that already finished training (final ``last.pt`` with ``test_loss``) are skipped.
     """
     reps = int(config["evaluation"]["repetitions"])
     seeds = list(config["evaluation"].get("seeds", list(range(reps))))[:reps]
@@ -459,13 +670,17 @@ def train_ts_jepa_repetitions(
 
     seed_results = []
     for seed in seeds:
+        seed_dir = root_runs / f"seed_{seed}"
+        if _seed_training_complete(seed_dir):
+            seed_results.append(_load_completed_seed_result(seed_dir))
+            continue
         result = train_ts_jepa(
             config,
             device=device,
             max_epochs=max_epochs,
             data_root=data_root,
             seed=int(seed),
-            run_dir=root_runs / f"seed_{seed}",
+            run_dir=seed_dir,
         )
         seed_results.append(result)
 

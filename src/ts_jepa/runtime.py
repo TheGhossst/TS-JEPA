@@ -370,6 +370,14 @@ def state_dict_to_cpu(state: Mapping[str, torch.Tensor]) -> dict[str, torch.Tens
     return {k: v.detach().cpu().contiguous() for k, v in state.items()}
 
 
+def load_checkpoint(path: Path | str) -> dict[str, Any]:
+    """Load a training or inference checkpoint from disk."""
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Checkpoint not found: {path}")
+    return torch.load(path, map_location="cpu", weights_only=False)
+
+
 def save_checkpoint(path: Path | str, payload: dict[str, Any]) -> None:
     """
     Windows/WDDM-safe checkpoint write.

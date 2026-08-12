@@ -209,7 +209,7 @@ ts_jepa:
     target_stop_gradient: true
     ema_after_optimizer_step: true
   early_stopping:
-    enabled: true
+    enabled: false
     patience: 20  # IC
     validation_trajectory_count: 20  # IC — carved from train only; not paper-specified
   dataset:
