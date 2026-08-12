@@ -13,15 +13,21 @@ CLI entry points for the TS-JEPA baseline. Run all commands from the repository 
 
 Root-level files such as `scripts/train_jepa.py` are thin wrappers that forward to `pipeline/` for backward compatibility.
 
-## Pipeline (recommended)
+## Full paper-scale pipeline
 
-Full paper-scale run with the corrected DP-teacher dataset:
+**Config:** `configs/ts_jepa_dp_fixed.yaml`  
+**Data:** `data_dp_fixed/`  
+**Runs:** `runs/ts_jepa_dp_fixed/`, `runs/semantic_actor_dp_fixed/`
+
+### One command
 
 ```powershell
 python scripts/pipeline/run_full_baseline.py --config configs/ts_jepa_dp_fixed.yaml --device cuda
 ```
 
-Step by step:
+Runs: generate trajectories → JEPA 5×150 epochs → actor 5×300 epochs → evaluation.
+
+### Step by step
 
 ```powershell
 python scripts/pipeline/validate_environment.py --config configs/ts_jepa_dp_fixed.yaml
@@ -31,7 +37,44 @@ python scripts/pipeline/train_actor.py --config configs/ts_jepa_dp_fixed.yaml --
 python scripts/pipeline/eval_runtime.py --config configs/ts_jepa_dp_fixed.yaml
 ```
 
-Use `--single-seed N` on the train scripts to run one seed only.
+### JEPA training (5 seeds × 150 epochs)
+
+Full 5-seed protocol (selects best validation run → `runs/ts_jepa_dp_fixed/best.pt`):
+
+```powershell
+python scripts/pipeline/train_jepa.py --config configs/ts_jepa_dp_fixed.yaml --device cuda
+```
+
+Single seed:
+
+```powershell
+python scripts/pipeline/train_jepa.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --single-seed 2
+```
+
+Resume interrupted seed (uses per-epoch `last.pt`):
+
+```powershell
+python scripts/pipeline/train_jepa.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --single-seed 2 --resume-from runs/ts_jepa_dp_fixed/seed_2/last.pt
+```
+
+```powershell
+python scripts/pipeline/train_jepa.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --single-seed 2 --resume
+```
+
+The 5-seed protocol skips seeds that already finished (final `last.pt` with `test_loss`). Completed seeds are not retrained unless you remove their run directory.
+
+### Partial / resume pipeline
+
+```powershell
+# Skip data generation (data already on disk)
+python scripts/pipeline/run_full_baseline.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --skip-generate
+
+# JEPA already done — actor + eval only
+python scripts/pipeline/run_full_baseline.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --skip-generate --skip-jepa
+
+# Override epoch count (smoke / debug only)
+python scripts/pipeline/run_full_baseline.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --jepa-epochs 3
+```
 
 ## Dev scripts
 
