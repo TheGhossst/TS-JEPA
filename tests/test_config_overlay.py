@@ -28,7 +28,7 @@ def test_dp_fixed_overlay_paths_and_hparams():
     assert config["ts_jepa"]["optimizer"]["learning_rate"] == 0.2
     assert config["ts_jepa"]["optimizer"]["weight_decay"] == 0.0004
     assert config["ts_jepa"]["target_encoder"]["ema_decay"] == 0.99
-    assert config["ts_jepa"]["early_stopping"]["enabled"] is False
+    assert config["ts_jepa"]["early_stopping"]["enabled"] is True
     assert config["simulation"]["init_noise"] == 0.35
     # Separated run dirs under project.
     root = project_root(config)

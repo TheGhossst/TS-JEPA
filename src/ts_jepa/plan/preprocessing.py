@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-# Paper-faithful values from docs/plan.md §5.1–§5.3.
+# Paper-faithful values from docs/plan.md §5. Follow the numbered training list;
+# do not insert extra stages.
 PLAN_PREPROCESSING: dict[str, Any] = {
     "color_jitter": {
         "brightness": 0.05,
@@ -23,8 +24,10 @@ PLAN_PREPROCESSING: dict[str, Any] = {
     "command_normalization": "z-score",
 }
 
-TRAINING_PIPELINE_STAGES = ("augmentation", "normalization", "formatting")
-EVAL_PIPELINE_STAGES = ("resize", "normalization")
+# Training numbered list (Section IV.A): jitter → color drop → normalize → resize.
+TRAINING_PIPELINE_STAGES = ("augmentation", "normalization", "resize")
+# Testing: same normalize→resize order as training, without stochastic aug.
+EVAL_PIPELINE_STAGES = ("normalization", "resize")
 
 
 def assert_plan_preprocessing_config(config: dict[str, Any]) -> None:
@@ -71,6 +74,18 @@ def assert_plan_preprocessing_config(config: dict[str, Any]) -> None:
     if cmd_norm != PLAN_PREPROCESSING["command_normalization"]:
         errors.append(
             f"input.command_normalization: expected {PLAN_PREPROCESSING['command_normalization']!r}, got {cmd_norm!r}"
+        )
+
+    training_order = config.get("preprocessing", {}).get("training", {}).get("order")
+    if training_order is not None and list(training_order) != list(TRAINING_PIPELINE_STAGES):
+        errors.append(
+            f"preprocessing.training.order: expected {list(TRAINING_PIPELINE_STAGES)}, got {training_order}"
+        )
+
+    eval_order = config.get("preprocessing", {}).get("evaluation", {}).get("order")
+    if eval_order is not None and list(eval_order) != list(EVAL_PIPELINE_STAGES):
+        errors.append(
+            f"preprocessing.evaluation.order: expected {list(EVAL_PIPELINE_STAGES)}, got {eval_order}"
         )
 
     if errors:

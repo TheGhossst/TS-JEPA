@@ -5,7 +5,7 @@ Full paper-scale baseline pipeline:
 1) Generate JEPA 200/40 and actor 100/20 trajectories
 2) Train 5 JEPA seeds (150 epochs), select best by validation
 3) Train 5 actor seeds (300 epochs), select best by validation
-4) Evaluate baseline (plan §16): NMAE, closed-loop, t-SNE, validation gate
+4) Evaluate baseline (plan §15): MAPE, NMAE, closed-loop, t-SNE, communication bits
 5) Optional: wireless eval only after baseline validation passes (--include-wireless)
 """
 
@@ -20,6 +20,7 @@ from pathlib import Path
 import torch
 
 from ts_jepa.config import actor_run_dirname, jepa_run_dirname, load_config, project_root
+from ts_jepa.data.dataset_sanity import sanity_check_trajectory_root
 from ts_jepa.data.trajectory_generator import generate_all_trajectories
 from ts_jepa.data.temporal_plan import assert_plan_temporal_config
 from ts_jepa.env.env_validation import assert_plan_environment_validated
@@ -35,9 +36,11 @@ from ts_jepa.plan.actor import (
     assert_plan_semantic_actor_config,
     assert_plan_semantic_actor_training_config,
 )
+from ts_jepa.plan.baseline_validation import assert_plan_baseline_validation_config
+from ts_jepa.plan.wireless import assert_plan_wireless_config
 from ts_jepa.training.train_actor import train_semantic_actor_repetitions
 from ts_jepa.training.train_jepa import train_ts_jepa_repetitions
-from ts_jepa.evaluation.checkpoints import resolve_run_checkpoint
+from ts_jepa.evaluation.checkpoints import resolve_jepa_checkpoint_from_actor, resolve_run_checkpoint
 
 
 def _count_npz(path: Path) -> int:
@@ -56,6 +59,13 @@ def verify_dataset_counts(config: dict, data_root: Path) -> None:
         if got != count:
             raise RuntimeError(f"Dataset count mismatch at {path}: got {got}, expected {count}")
         print(f"OK {path}: {got}")
+    report = sanity_check_trajectory_root(config, data_root, fit_normalizer=False)
+    if not report["overall_pass"]:
+        raise RuntimeError(
+            "Trajectory sanity failed (native resolution, D_s/D_a overlap, or teacher checks). "
+            f"pass={report['pass']} id_overlap={report.get('id_overlap')}"
+        )
+    print("OK trajectory sanity (native HW, disjoint D_s/D_a, teacher)")
 
 
 def main() -> None:
@@ -85,6 +95,8 @@ def main() -> None:
     assert_plan_semantic_actor_config(config)
     if args.actor_epochs is None:
         assert_plan_semantic_actor_training_config(config)
+    assert_plan_baseline_validation_config(config)
+    assert_plan_wireless_config(config)
     root = project_root(config)
     data_root = root / config["paths"]["data_root"]
     runs_root = root / config["paths"]["runs_root"]
@@ -136,9 +148,9 @@ def main() -> None:
 
     if not args.skip_eval:
         t0 = time.time()
-        print("Evaluating untouched test sets + baseline report (plan §16)...")
-        jepa_ckpt = resolve_run_checkpoint(runs_root, jepa_family)
+        print("Evaluating untouched test sets + baseline report (plan §15)...")
         actor_ckpt = resolve_run_checkpoint(runs_root, actor_family)
+        jepa_ckpt = resolve_jepa_checkpoint_from_actor(actor_ckpt, project_dir=root)
         controller = FrozenRuntimeController.from_checkpoints(
             config,
             jepa_ckpt,

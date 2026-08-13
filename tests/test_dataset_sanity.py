@@ -9,7 +9,7 @@ from ts_jepa.config import load_config
 from ts_jepa.data.dataset_sanity import inspect_split, sanity_check_trajectory_root
 
 
-def _write_traj(path: Path, *, traj_id: int, steps: int, commands: np.ndarray, render_hw: tuple[int, int] = (64, 128)) -> None:
+def _write_traj(path: Path, *, traj_id: int, steps: int, commands: np.ndarray, render_hw: tuple[int, int] = (128, 256)) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     h, w = render_hw
     frames = np.zeros((steps, h, w, 3), dtype=np.uint8)
@@ -77,17 +77,48 @@ def test_sanity_check_root_overlap_and_normalizer(tmp_path: Path) -> None:
     )
     for i, force in enumerate([12.0, -12.0]):
         cmds = np.array([force, 0.0, -4.0, 4.0], dtype=np.float32)
-        _write_traj(root / "trajectories" / "actor" / "train" / f"{i:05d}.npz", traj_id=i, steps=4, commands=cmds)
+        _write_traj(root / "trajectories" / "actor" / "train" / f"{i + 3:05d}.npz", traj_id=i + 3, steps=4, commands=cmds)
     _write_traj(
-        root / "trajectories" / "actor" / "test" / "00002.npz",
-        traj_id=2,
+        root / "trajectories" / "actor" / "test" / "00005.npz",
+        traj_id=5,
         steps=4,
         commands=np.array([-20.0, 0.0, 20.0, 4.0], dtype=np.float32),
     )
 
     report = sanity_check_trajectory_root(config, root, fit_normalizer=True)
     assert report["overall_pass"]
+    assert report["id_overlap"]["D_s_vs_D_a"]["no_overlap"]
+    assert report["overall_pass"]
     assert report["command_normalizer"]["nondegenerate"]
     assert (root / "stats" / "command_norm.json").exists()
     payload = json.loads((root / "stats" / "command_norm.json").read_text(encoding="utf-8"))
     assert abs(float(payload["std"])) > 1e-8
+
+
+def test_sanity_fails_encoder_sized_frames_and_ds_da_overlap(tmp_path: Path) -> None:
+    config = load_config()
+    config = dict(config)
+    config["paths"] = dict(config["paths"])
+    config["paths"]["data_root"] = str(tmp_path)
+    config["simulation"] = dict(config["simulation"])
+    config["simulation"]["trajectory_steps"] = 4
+    config["ts_jepa"] = dict(config["ts_jepa"])
+    config["ts_jepa"]["dataset"] = {"train_trajectories": 1, "test_trajectories": 1}
+    config["semantic_actor"] = dict(config["semantic_actor"])
+    config["semantic_actor"]["dataset"] = {"train_trajectories": 1, "test_trajectories": 1}
+
+    cmds = np.array([4.0, -4.0, 0.0, 8.0], dtype=np.float32)
+    _write_traj(
+        tmp_path / "trajectories" / "jepa" / "train" / "00000.npz",
+        traj_id=0,
+        steps=4,
+        commands=cmds,
+        render_hw=(64, 128),
+    )
+    _write_traj(tmp_path / "trajectories" / "jepa" / "test" / "00001.npz", traj_id=1, steps=4, commands=cmds)
+    _write_traj(tmp_path / "trajectories" / "actor" / "train" / "00000.npz", traj_id=0, steps=4, commands=cmds)
+    _write_traj(tmp_path / "trajectories" / "actor" / "test" / "00002.npz", traj_id=2, steps=4, commands=cmds)
+    report = sanity_check_trajectory_root(config, tmp_path, fit_normalizer=True)
+    assert not report["splits"]["jepa_train"]["pass"]["frame_shape_ok"]
+    assert not report["id_overlap"]["D_s_vs_D_a"]["no_overlap"]
+    assert not report["overall_pass"]

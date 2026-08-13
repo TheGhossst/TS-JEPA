@@ -30,37 +30,42 @@ class ResidualBlock(nn.Module):
 
 class ContextEncoder(nn.Module):
     """
-    Context / online encoder Ψθ (plan §6.1).
+    Context / online encoder Ψθ (plan §7).
 
-    Architecture:
-      Input [B, C_in, 64, 128]  (C_in = 3 or 6 for κ = 1 / 2)
-        → Conv2D C_in→64, k=7, s=2 → BN → ReLU → MaxPool
-        → residual stage 64
-        → residual stage 128 (stride 2)
-        → residual stage 256 (stride 2)
-        → global average pool
-        → linear → 256-D embedding
+    Paper-specified: deep conv ResNet widths 64, 128, 256, each with BN and ReLU.
+
+    Stem, MaxPool, residual-block count, and spatial-pool head are IMPLEMENTATION
+    CHOICES (plan §7: do not label them paper architecture).
     """
 
     def __init__(
         self,
-        in_channels: int = 6,
+        in_channels: int = 3,
         widths: list[int] | tuple[int, ...] = (64, 128, 256),
         embedding_dim: int = 256,
         blocks_per_stage: int = 2,
+        spatial_pool_hw: tuple[int, int] | list[int] = (4, 8),
+        *,
+        strict_baseline_dim: bool = True,
     ) -> None:
         super().__init__()
         if tuple(widths) != (64, 128, 256):
-            raise ValueError(f"plan §6.1 widths must be [64, 128, 256], got {list(widths)}")
-        if int(embedding_dim) != 256:
-            raise ValueError(f"plan §6.1 embedding_dim must be 256, got {embedding_dim}")
+            raise ValueError(f"plan §7 widths must be [64, 128, 256], got {list(widths)}")
+        if int(embedding_dim) != 256 and strict_baseline_dim:
+            raise ValueError(
+                f"paper-implied baseline embedding_dim is 256 (plan §6/§9), got {embedding_dim}. "
+                "Pass strict_baseline_dim=False for the plan §17 Fig. 7 grid."
+            )
 
         self.in_channels = int(in_channels)
         self.widths = tuple(int(w) for w in widths)
         self.embedding_dim = int(embedding_dim)
         self.blocks_per_stage = int(blocks_per_stage)
+        self.spatial_pool_hw = (int(spatial_pool_hw[0]), int(spatial_pool_hw[1]))
+        if self.spatial_pool_hw[0] < 1 or self.spatial_pool_hw[1] < 1:
+            raise ValueError(f"spatial_pool_hw must be positive, got {self.spatial_pool_hw}")
 
-        # Plan §6.1 stem: Conv2D → BN → ReLU → MaxPool
+        # IC stem (not paper-specified): Conv 7×7 s2 → BN → ReLU → MaxPool 3×3 s2
         self.stem = nn.Sequential(
             nn.Conv2d(self.in_channels, self.widths[0], kernel_size=7, stride=2, padding=3, bias=False),
             nn.BatchNorm2d(self.widths[0]),
@@ -72,8 +77,9 @@ class ContextEncoder(nn.Module):
         self.stage128 = self._make_stage(self.widths[0], self.widths[1], stride=2)
         self.stage256 = self._make_stage(self.widths[1], self.widths[2], stride=2)
 
-        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.projection = nn.Linear(self.widths[-1], self.embedding_dim)
+        self.global_pool = nn.AdaptiveAvgPool2d(tuple(self.spatial_pool_hw))
+        pooled_dim = self.widths[-1] * self.spatial_pool_hw[0] * self.spatial_pool_hw[1]
+        self.projection = nn.Linear(pooled_dim, self.embedding_dim)
 
     def _make_stage(self, in_channels: int, out_channels: int, stride: int) -> nn.Sequential:
         blocks = [ResidualBlock(in_channels, out_channels, stride=stride)]
@@ -97,9 +103,10 @@ class ContextEncoder(nn.Module):
             "blocks_per_stage": self.blocks_per_stage,
             "stem": "Conv7x7s2-BN-ReLU-MaxPool3x3s2",
             "stages": ["64", "128@s2", "256@s2"],
-            "head": "GAP-Linear",
+            "head": "SpatialPool-Flatten-Linear",
+            "spatial_pool_hw": list(self.spatial_pool_hw),
         }
 
 
-# Resolve forward reference for plan §7 alias.
+# Alias: target encoder Ψθ̄ uses the same class as the context encoder (plan §8).
 TargetEncoder = ContextEncoder

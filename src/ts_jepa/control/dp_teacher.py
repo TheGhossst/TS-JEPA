@@ -33,10 +33,12 @@ class DPControlTeacher:
     """
     Nonlinear DP teacher on a discretized 4D cart-pole grid.
 
-    Method is paper-specified (nonlinear DP). All numeric solver details below are
-    IMPLEMENTATION CHOICES (paper-silent):
-      - DP transition = N physics steps at env.ode.dt (default N=50 → 0.05 s)
-      - integrated successor state cost + control cost charged **once** per DP decision
+    Method is paper-specified (nonlinear DP). Eq. 2 is subject to Eq. 1, whose
+    index k has period τ_o; with env.ode.dt = τ_o this means one Bellman
+    transition = one physics step (dp_substeps=1).
+
+    Remaining IMPLEMENTATION CHOICES (paper-silent):
+      - integrated successor state cost + control cost charged once per DP decision
       - R, gamma, VI iters, grid resolution, force bins
     """
 
@@ -51,7 +53,7 @@ class DPControlTeacher:
         discount: float = 0.99,
         value_iteration_iters: int = 50,
         desired_state: list[float] | None = None,
-        dp_substeps: int = 50,
+        dp_substeps: int = 1,
     ) -> None:
         self.env = env
         self.grid = DPGrid.from_config(grid)
@@ -60,8 +62,11 @@ class DPControlTeacher:
         self.discount = float(discount)
         self.value_iteration_iters = int(value_iteration_iters)
         self.dp_substeps = int(dp_substeps)
-        if self.dp_substeps < 1:
-            raise ValueError(f"dp_substeps must be >= 1, got {self.dp_substeps}")
+        if self.dp_substeps != 1:
+            raise ValueError(
+                f"dp_substeps must be 1 so one Bellman transition equals one τ_o "
+                f"physics step (Eq. 2 subject to Eq. 1); got {self.dp_substeps}"
+            )
         self.desired_state = np.asarray(
             desired_state if desired_state is not None else [0.0, 0.0, 0.0, 0.0],
             dtype=np.float64,
@@ -112,12 +117,11 @@ class DPControlTeacher:
         self, states: np.ndarray, force: float
     ) -> tuple[np.ndarray, np.ndarray]:
         """
-        Hold `force` for dp_substeps physics steps.
+        Hold `force` for one τ_o physics step (dp_substeps=1).
 
-        Stage cost (IC):
-          sum_{j=1..N} 0.5 ||s_j - s*||^2   +   0.5 R u^2
-        State cost is integrated over the transition; control cost is charged
-        once per DP decision (not N times), matching one action per Bellman step.
+        Stage cost (IC numerics; one-step structure follows Eq. 3's per-k term):
+          0.5 ||s_{k+1} - s*||^2   +   0.5 R u^2
+        Control cost is charged once per DP decision.
         """
         single = states.ndim == 1
         s = states.reshape(-1, 4).astype(np.float64)
@@ -174,7 +178,7 @@ class DPControlTeacher:
         self.policy = policy
 
     def act(self, state: np.ndarray) -> float:
-        """Local discrete re-optimization with the same N-step Bellman cost as VI."""
+        """Local discrete re-optimization with the same one-step Bellman cost as VI."""
         state = np.asarray(state, dtype=np.float64).reshape(4)
         table_u = float(self.policy[self._index_of(state)])
         deltas = np.array([0.0, -4.0, 4.0, -8.0, 8.0], dtype=np.float64)

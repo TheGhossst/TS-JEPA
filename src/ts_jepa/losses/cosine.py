@@ -1,4 +1,4 @@
-"""Backward-compatible re-export of plan §11 JEPA loss."""
+"""Backward-compatible re-export of plan §10 JEPA loss."""
 
 from __future__ import annotations
 

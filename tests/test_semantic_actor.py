@@ -1,4 +1,4 @@
-"""Plan §14–§15 semantic actor tests."""
+"""Plan §12 semantic actor tests."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from ts_jepa.config import load_config
 from ts_jepa.models.actor import SemanticActor
 from ts_jepa.models.ts_jepa import TSJEPA
 from ts_jepa.plan.actor import (
+    IC_ACTOR_OUTPUT_ACTIVATION,
     PLAN_SEMANTIC_ACTOR,
     PLAN_SEMANTIC_ACTOR_TRAINING,
     assert_plan_semantic_actor_config,
@@ -20,7 +21,7 @@ from ts_jepa.plan.actor import (
 from ts_jepa.training.train_actor import _assert_encoder_frozen, _assert_optimizer_only_actor
 
 
-def test_baseline_config_matches_plan_section14_and_15():
+def test_baseline_config_matches_plan_section12():
     config = load_config()
     assert_plan_semantic_actor_config(config)
     assert_plan_semantic_actor_training_config(config)
@@ -28,6 +29,8 @@ def test_baseline_config_matches_plan_section14_and_15():
     opt = config["semantic_actor"]["optimizer"]
     assert arch["hidden_dims"] == PLAN_SEMANTIC_ACTOR["hidden_dims"]
     assert arch["activation"] == "ReLU"
+    assert "output_activation" not in PLAN_SEMANTIC_ACTOR
+    assert arch["output_activation"] == IC_ACTOR_OUTPUT_ACTIVATION
     assert arch["dropout"] == PLAN_SEMANTIC_ACTOR_TRAINING["dropout"]
     assert config["semantic_actor"]["loss"] == "MSE"
     assert opt["type"] == "AdamW"
@@ -36,6 +39,7 @@ def test_baseline_config_matches_plan_section14_and_15():
     assert opt["epochs"] == 300
     assert config["semantic_actor"]["early_stopping"]["enabled"] is True
     assert config["evaluation"]["repetitions"] == 5
+    assert config["evaluation"]["reported_result"] == "best"
 
 
 def test_dp_fixed_overlay_preserves_actor_plan():
@@ -77,7 +81,7 @@ def test_semantic_actor_rejects_wrong_hidden_depth():
 def test_assert_plan_semantic_actor_rejects_wrong_hidden_dims():
     config = copy.deepcopy(load_config())
     config["semantic_actor"]["architecture"]["hidden_dims"] = [512, 128]
-    with pytest.raises(ValueError, match="Plan §14|hidden_dims"):
+    with pytest.raises(ValueError, match="Plan §12|hidden_dims"):
         assert_plan_semantic_actor_config(config)
 
 
@@ -98,6 +102,7 @@ def test_assert_plan_semantic_actor_rejects_non_mse_loss():
         (lambda c: c["semantic_actor"]["optimizer"].update({"epochs": 100}), "300"),
         (lambda c: c["semantic_actor"]["early_stopping"].update({"enabled": False}), "early_stopping"),
         (lambda c: c["evaluation"].update({"repetitions": 3}), "repetitions"),
+        (lambda c: c["evaluation"].update({"reported_result": "mean"}), "reported_result"),
     ],
 )
 def test_assert_plan_semantic_actor_training_rejects_mismatches(mutator, match):
@@ -141,3 +146,40 @@ def test_mse_regression_shape():
     assert torch.isfinite(loss)
     loss.backward()
     assert any(p.grad is not None for p in actor.parameters())
+
+
+def test_actor_linear_output_has_no_clip_or_tanh():
+    actor = SemanticActor.from_config(load_config())
+    actor.assert_plan_architecture()
+    assert isinstance(actor.net[-1], nn.Linear)
+    assert actor.net[-1].out_features == 1
+    assert not any(isinstance(m, (nn.Tanh, nn.Sigmoid, nn.Hardtanh)) for m in actor.net)
+    z = torch.randn(5, 256)
+    u = actor(z)
+    assert u.shape == (5, 1)
+
+
+def test_assert_plan_does_not_lock_output_activation_ic():
+    """Linear head is a plan §18 IC; changing it must not fail assert_plan_*."""
+    config = copy.deepcopy(load_config())
+    config["semantic_actor"]["architecture"]["output_activation"] = "tanh"
+    assert_plan_semantic_actor_config(config)
+
+
+def test_assert_plan_rejects_desired_state_actor_input():
+    config = copy.deepcopy(load_config())
+    config["semantic_actor"]["architecture"]["use_desired_state"] = True
+    with pytest.raises(ValueError, match="desired_state"):
+        assert_plan_semantic_actor_config(config)
+    config = copy.deepcopy(load_config())
+    config["semantic_actor"]["inputs"] = ["embedding", "desired_state"]
+    with pytest.raises(ValueError, match="desired_state|embedding-only"):
+        assert_plan_semantic_actor_config(config)
+
+
+def test_actor_forward_takes_embedding_only():
+    import inspect
+
+    sig = inspect.signature(SemanticActor.forward)
+    params = [p for p in sig.parameters if p != "self"]
+    assert params == ["embedding"]

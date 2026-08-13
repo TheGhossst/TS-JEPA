@@ -45,7 +45,8 @@ def verify_not_uniform_random_actions(
     """
     Plan §4.1: explicitly verify commands are not i.i.d. Uniform(force_min, force_max).
 
-    Uses lag-1 autocorrelation and histogram structure vs a synthetic uniform-iid reference.
+    Histogram CV or lag-1 autocorrelation vs a synthetic uniform-iid reference.
+    A 1 ms τ_o DP teacher may lack lag-1 persistence; a peaked histogram is enough.
     """
     if not commands_by_trajectory:
         return {
@@ -79,11 +80,13 @@ def verify_not_uniform_random_actions(
     ref_counts = ref_counts.astype(np.float64) + 1e-6
     ref_cv = float(ref_counts.std() / ref_counts.mean())
 
+    hist_strongly_structured = hist_cv > ref_cv * 2.0
+    autocorr_exceeds = abs(policy_mean_ac) > abs(uniform_mean_ac) + autocorr_margin
     checks = {
         "has_trajectories": True,
         "command_std_gt_0": float(np.std(all_cmds)) > 0.0,
-        "autocorr_exceeds_uniform_iid": abs(policy_mean_ac) > abs(uniform_mean_ac) + autocorr_margin,
-        "histogram_more_structured_than_uniform_iid": hist_cv > ref_cv * 0.75,
+        "autocorr_exceeds_uniform_iid": autocorr_exceeds,
+        "histogram_more_structured_than_uniform_iid": hist_strongly_structured,
     }
     return {
         "policy_mean_lag1_autocorr": policy_mean_ac,
@@ -91,7 +94,13 @@ def verify_not_uniform_random_actions(
         "command_histogram_cv": hist_cv,
         "uniform_reference_histogram_cv": ref_cv,
         "checks": checks,
-        "pass": all(checks.values()),
+        # Either a clearly peaked histogram (1 ms τ_o DP) or lag-1 persistence
+        # rules out i.i.d. Uniform(-20, 20). Neither is required of the other.
+        "pass": bool(
+            checks["has_trajectories"]
+            and checks["command_std_gt_0"]
+            and (hist_strongly_structured or autocorr_exceeds)
+        ),
     }
 
 
@@ -171,6 +180,15 @@ def inspect_split(
                 if frames.ndim != 4 or frames.shape[1:3] != (exp_h, exp_w) or frames.shape[3] != 3:
                     frame_shape_ok = False
                     errors.append(f"{path.name}: frame shape {frames.shape}, expected (*, {exp_h}, {exp_w}, 3)")
+                if "render_height" in data and "render_width" in data:
+                    meta_h = int(np.asarray(data["render_height"]).item())
+                    meta_w = int(np.asarray(data["render_width"]).item())
+                    if (meta_h, meta_w) != (exp_h, exp_w):
+                        frame_shape_ok = False
+                        errors.append(
+                            f"{path.name}: render_height/width metadata {(meta_h, meta_w)} "
+                            f"!= native {(exp_h, exp_w)}"
+                        )
             if frames.shape[0] != expected_steps or cmds.shape[0] != expected_steps or states.shape[0] != expected_steps:
                 length_ok = False
                 errors.append(f"{path.name}: length mismatch frames/cmds/states vs {expected_steps}")
@@ -261,6 +279,19 @@ def sanity_check_trajectory_root(
             "no_overlap": len(overlap) == 0,
         }
 
+    # D_s vs D_a must not share trajectory_index (IC: disjoint physical rollouts).
+    jepa_ids = set(report["splits"]["jepa_train"].get("trajectory_ids") or []) | set(
+        report["splits"]["jepa_test"].get("trajectory_ids") or []
+    )
+    actor_ids = set(report["splits"]["actor_train"].get("trajectory_ids") or []) | set(
+        report["splits"]["actor_test"].get("trajectory_ids") or []
+    )
+    ds_da_overlap = sorted(jepa_ids & actor_ids)
+    report["id_overlap"]["D_s_vs_D_a"] = {
+        "overlap_ids": ds_da_overlap,
+        "no_overlap": len(ds_da_overlap) == 0,
+    }
+
     # Command normalizer from JEPA train only (same as training pipeline).
     if fit_normalizer and report["splits"]["jepa_train"]["n_files"] > 0:
         normalizer = fit_command_normalizer(config, data_root=root)
@@ -286,13 +317,14 @@ def sanity_check_trajectory_root(
             }
 
     split_ok = all(report["splits"][k]["split_pass"] for k in report["splits"])
-    overlap_ok = all(report["id_overlap"][f]["no_overlap"] for f in ("jepa", "actor"))
+    overlap_ok = all(report["id_overlap"][f]["no_overlap"] for f in ("jepa", "actor", "D_s_vs_D_a"))
     norm = report["command_normalizer"] or {}
     norm_ok = bool(norm.get("nondegenerate"))
     teacher_ok = bool(teacher_check.get("pass"))
     report["pass"] = {
         "all_splits": split_ok,
         "no_train_test_id_overlap": overlap_ok,
+        "no_D_s_D_a_id_overlap": bool(report["id_overlap"]["D_s_vs_D_a"]["no_overlap"]),
         "command_normalizer_nondegenerate": norm_ok,
         "teacher_not_uniform_random": teacher_ok,
     }

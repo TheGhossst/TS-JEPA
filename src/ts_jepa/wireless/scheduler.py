@@ -13,8 +13,8 @@ SchedulerName = Literal["channel_aware", "round_robin", "opportunistic"]
 
 @dataclass
 class DeviceNetState:
-    aoi: float = 1.0  # β_i,0 = 1 (Algorithm 2)
-    virtual_queue: float = 0.0  # Q_i,0 = 0
+    aoi: float = 1.0  # β_{i,0} = 1 (paper Eq. 17 / Algorithm 2)
+    virtual_queue: float = 0.0  # Q_{i,0} = 0 (paper Eq. 18)
     last_alpha: int = 0
     last_power: float = 0.0
 
@@ -23,36 +23,45 @@ class DeviceNetState:
 class ScheduleDecision:
     alphas: dict[int, int]
     powers: dict[int, float]
+    successes: dict[int, int] = field(default_factory=dict)
+    outages: dict[int, int] = field(default_factory=dict)
+    realized_snr_db: dict[int, float] = field(default_factory=dict)
     indices: dict[int, float] = field(default_factory=dict)
     costs: dict[int, float] = field(default_factory=dict)
 
 
 class ChannelAwareScheduler:
     """
-    Channel-aware drift-plus-penalty scheduler (paper Algorithm 2; eqs. 17, 18, 23–25).
+    Channel-aware scheduler (plan §13; paper Algorithm 2; eqs. 17, 18, 23–25).
 
-    PAPER-SPECIFIED flow:
-      observe H, β → p_req (23) → infeasible if > p_max → index → Top-J with S>0
-      AoI (17): β←1 if scheduled else β←β+1
-      Virtual queue (18): Q ← max(Q - β_th, 0) + β
+    PAPER-SPECIFIED:
+      observe H, β → p_req (23)
+      if p_req > p_max: S = −∞ (infeasible)
+      else S_{i,k} from eq. (25); schedule up to J devices with largest positive S
+      scheduled devices transmit at p_{i,k} = p_req
+      AoI (Eq. 17): β←1 if α=1, else β←β+1  (slot index, not τ_o)
+      Virtual queue (Eq. 18): Q ← max(Q − β_th, 0) + β_k
+      Lyapunov constant B in eq. (22) is omitted (paper: does not affect performance)
 
-    Index selection note:
-      Eq. (24) minimizes sum_i α_i * C_i with
-        C_i = 1 - (β+1)^2 - 2 Q β + V p_req   (same expression as typeset eq. 25)
-      Algorithm 2 selects the largest positive indices. To reconcile minimization
-      with that selection rule, we use urgency U_i = -C_i and select Top-J with U_i > 0.
-      This is documented in IMPLEMENTATION_CHOICES.md.
+    Eq. (24) minimizes Σ α_i C_i with
+      C_i = 1 − (β+1)^2 − 2 Q β + V p_req
+    Algorithm 2 selects largest positive indices. Eq. (25) is S_i = −C_i, so
+    Top-J with S_i > 0 implements both. V, β_th, p_max, J, I are IMPLEMENTATION CHOICE.
 
-    Unspecified numerical values (V, β_th, p_max, J, I) remain IMPLEMENTATION CHOICE.
+    Packet delivery (γ ≥ γ_th) is separate from AoI: it decides whether the
+    embedding arrives at the controller, not β.
+
+    Round-robin / opportunistic are paper baselines (plan §16), not Algorithm 2.
+    The scheduler is not an input to the predictor.
     """
 
     def __init__(self, config: dict[str, Any], policy: SchedulerName = "channel_aware") -> None:
         w = config["wireless"]
-        self.num_devices = int(w["num_devices"])
-        self.J = int(w["max_devices_scheduled_J"])
-        self.V = float(w["drift_plus_penalty_V"])
-        self.beta_th = float(w["aoi_threshold_beta_th"])
-        self.p_max = float(w["p_max_watt"])
+        self.num_devices = int(w["num_devices"])  # I — IMPLEMENTATION CHOICE
+        self.J = int(w["max_devices_scheduled_J"])  # IMPLEMENTATION CHOICE
+        self.V = float(w["drift_plus_penalty_V"])  # IMPLEMENTATION CHOICE
+        self.beta_th = float(w["aoi_threshold_beta_th"])  # IMPLEMENTATION CHOICE
+        self.p_max = float(w["p_max_watt"])  # IMPLEMENTATION CHOICE
         self.snr_target_db = float(w["snr_targets_db"][0])
         self.policy = policy
         self.channel = WirelessChannelModel(config)
@@ -63,12 +72,16 @@ class ChannelAwareScheduler:
         self.snr_target_db = float(snr_db)
 
     def drift_plus_penalty_cost(self, aoi: float, queue: float, p_req: float) -> float:
-        """Per-device coefficient C_i in paper eqs. (24)–(25) as typeset."""
+        """Per-device coefficient C_i in paper eq. (24). Lyapunov B omitted."""
         return 1.0 - (aoi + 1.0) ** 2 - 2.0 * queue * aoi + self.V * p_req
 
-    def urgency_index(self, aoi: float, queue: float, p_req: float) -> float:
-        """U_i = -C_i so Algorithm 2 'largest positive' matches minimizing sum α C."""
+    def drift_plus_penalty_index(self, aoi: float, queue: float, p_req: float) -> float:
+        """Paper eq. (25) index S_{i,k} = −C_i (Algorithm 2: largest positive S)."""
         return -self.drift_plus_penalty_cost(aoi, queue, p_req)
+
+    def urgency_index(self, aoi: float, queue: float, p_req: float) -> float:
+        """Alias for eq. (25) S_{i,k}."""
+        return self.drift_plus_penalty_index(aoi, queue, p_req)
 
     def schedule(self, rng: np.random.Generator | None = None) -> ScheduleDecision:
         rng = rng or np.random.default_rng()
@@ -105,19 +118,34 @@ class ChannelAwareScheduler:
                     costs[i] = float("inf")
                     continue
                 cost = self.drift_plus_penalty_cost(st.aoi, st.virtual_queue, sample.p_req)
-                urgency = -cost
+                index_s = -cost
                 costs[i] = cost
-                indices[i] = urgency
-                if urgency > 0.0:
-                    scored.append((urgency, i))
+                indices[i] = index_s
+                if index_s > 0.0:
+                    scored.append((index_s, i))
             scored.sort(reverse=True)
             chosen = [i for _, i in scored[: self.J]]
 
         for i in chosen:
             alphas[i] = 1
-            powers[i] = samples[i].p_req
+            powers[i] = samples[i].p_req  # Algorithm 2: p_{i,k} = p^{req}_{i,k}
 
-        # Paper eqs. (17) and (18): update AoI then virtual queues using current β_i,k.
+        successes = {i: 0 for i in range(self.num_devices)}
+        outages = {i: 0 for i in range(self.num_devices)}
+        realized_snr_db = {i: float("-inf") for i in range(self.num_devices)}
+        for i in range(self.num_devices):
+            if alphas[i] != 1:
+                continue
+            sample = samples[i]
+            snr_db = self.channel.snr_db(powers[i], sample.h_complex_power, sample.path_loss_db)
+            realized_snr_db[i] = snr_db
+            if self.channel.is_outage(snr_db, self.snr_target_db):
+                outages[i] = 1
+                successes[i] = 0
+            else:
+                successes[i] = 1
+
+        # Plan §13 Eq. (17): β_{k+1}=1 if α_k=1, else 1+β_k. Eq. (18) uses β_k.
         for i, st in self.states.items():
             beta_k = st.aoi
             if alphas[i] == 1:
@@ -128,4 +156,12 @@ class ChannelAwareScheduler:
             st.last_alpha = alphas[i]
             st.last_power = powers[i]
 
-        return ScheduleDecision(alphas=alphas, powers=powers, indices=indices, costs=costs)
+        return ScheduleDecision(
+            alphas=alphas,
+            powers=powers,
+            successes=successes,
+            outages=outages,
+            realized_snr_db=realized_snr_db,
+            indices=indices,
+            costs=costs,
+        )

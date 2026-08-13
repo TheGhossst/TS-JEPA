@@ -13,8 +13,8 @@ def test_model_forward_shapes_and_loss():
     model = TSJEPA(config)
     actor = SemanticActor(embedding_dim=256)
     b, kp = 2, config["ts_jepa"]["prediction_horizon"]["Kp"]
-    context = torch.randn(b, 6, 64, 128)
-    future = torch.randn(b, kp, 6, 64, 128)
+    context = torch.randn(b, 3, 64, 128)
+    future = torch.randn(b, kp, 3, 64, 128)
     commands = torch.randn(b, kp)
     z = model.encode_context(context)
     z_tgt = model.encode_targets(future)

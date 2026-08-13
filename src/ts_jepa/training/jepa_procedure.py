@@ -1,10 +1,10 @@
 """
-Plan §13 TS-JEPA training procedure (per effective training batch).
+Plan §10 Algorithm 1 TS-JEPA training procedure (per effective training batch).
 
 Steps:
   1. Context encoding:  z_k = Ψθ(x_k)
   2. Target encoding:   z̄_{k+j} = Ψθ̄(x_{k+j})  with stop-gradient
-  3. Autoregressive prediction of z̃_{k+1..k+Kp} using §10 command source
+  3. Autoregressive prediction of z̃_{k+1..k+Kp} using §9 command source
   4. JEPA loss L_JEPA = -mean(cos_sim)
   5. SGD update of θ (context encoder) and ϕ (predictor) only
   6. EMA update θ̄ ← η θ̄ + (1-η) θ
@@ -35,7 +35,7 @@ __all__ = [
 
 @dataclass(frozen=True)
 class JEPAForwardResult:
-    """Outputs of plan §13 steps 1–4 for one microbatch / batch."""
+    """Outputs of plan §10 Algorithm 1 steps 1–4 for one microbatch / batch."""
 
     z_context: torch.Tensor
     z_target: torch.Tensor
@@ -50,7 +50,7 @@ def jepa_forward_batch(
     resolution: PredictorCommandResolution | None = None,
 ) -> JEPAForwardResult:
     """
-    Plan §13 steps 1–4 for one batch.
+    Plan §10 Algorithm 1 steps 1–4 for one batch.
 
     Does not call optimizer or EMA (steps 5–6 belong to the outer train loop /
     accumulation group).
@@ -67,7 +67,7 @@ def jepa_forward_batch(
     with torch.no_grad():
         z_target = model.encode_targets(future)
 
-    # Step 3 — autoregressive prediction (§10 command source)
+    # Step 3 — autoregressive prediction (§9 command source)
     z_pred = model.predict(z_context, commands_norm)
 
     # Step 4 — JEPA loss
@@ -84,7 +84,7 @@ def jepa_forward_batch(
 
 def jepa_sgd_and_ema_step(model: TSJEPA, optimizer: torch.optim.Optimizer) -> None:
     """
-    Plan §13 steps 5–6: SGD on θ,ϕ then EMA on θ̄.
+    Plan §10 Algorithm 1 steps 5–6: SGD on θ,ϕ then EMA on θ̄.
 
     Call once per effective batch (after gradient accumulation completes).
     """

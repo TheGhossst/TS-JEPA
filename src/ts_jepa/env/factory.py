@@ -29,4 +29,5 @@ def build_inverted_cartpole_env(config: dict[str, Any]) -> InvertedCartPoleEnv:
         params=params,
         process_noise_std=float(sim.get("process_noise_std", 0.0)),
         init_noise=float(sim.get("init_noise", 0.05)),
+        observation_stride_steps=int(sim.get("observation_stride_steps", 1)),
     )

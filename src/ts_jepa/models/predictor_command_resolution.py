@@ -1,10 +1,10 @@
 """
-Plan §10 / §26.1: predicted-command training ambiguity.
+Plan §9: predicted-command training ambiguity (OPEN).
 
 The paper defines predictor conditioning on predicted commands ũ, but does not
-fully specify how the complete command sequence is produced during TS-JEPA
-pretraining. This module records the selected implementation candidate, keeps
-status OPEN, and prevents silent paper-exact claims.
+specify how that sequence is produced during TS-JEPA pretraining. This module
+records the selected implementation candidate, keeps status OPEN, and prevents
+silent paper-exact claims.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Any
 
 import torch
 
-# Plan §10 candidate mechanisms (evaluate separately; do not merge without ablation).
+# Plan §9 candidate mechanisms (evaluate separately; do not merge without ablation).
 COMMAND_SOURCE_CANDIDATES: tuple[str, ...] = (
     "teacher_dp",
     "semantic_actor",
@@ -31,7 +31,7 @@ IMPLEMENTED_COMMAND_SOURCES: frozenset[str] = frozenset({"teacher_dp"})
 
 @dataclass(frozen=True)
 class PredictorCommandResolution:
-    """Recorded plan §10 resolution state (not a paper fact)."""
+    """Recorded plan §9 ũ-source resolution state (not a paper fact)."""
 
     status: str
     status_description: str
@@ -70,7 +70,7 @@ def load_predictor_command_resolution(config: dict[str, Any]) -> PredictorComman
         "teacher_dp": (
             "teacher_commands_norm",
             "DP teacher ground-truth u* from trajectory dataset (normalized). "
-            "Used as a documented §10 candidate — NOT paper ũ.",
+            "Used as a documented §9 candidate — NOT paper ũ.",
         ),
         "semantic_actor": (
             "semantic_actor_commands_norm",
@@ -111,11 +111,11 @@ def load_predictor_command_resolution(config: dict[str, Any]) -> PredictorComman
 
 def assert_plan_predictor_command_resolution(config: dict[str, Any]) -> None:
     """
-    Validate plan §10 documentation is explicit and internally consistent.
+    Validate plan §9 documentation is explicit and internally consistent.
 
     Fails when:
       - status is not OPEN
-      - paper_exact is true (forbidden until paper resolves §10)
+      - paper_exact is true (forbidden until the paper's ũ source is specified)
       - selected source is undocumented or not in candidates
       - predictor.command_source disagrees with resolution block
       - selected source is not implemented in this codebase
@@ -128,7 +128,7 @@ def assert_plan_predictor_command_resolution(config: dict[str, Any]) -> None:
     if resolution.status != RESOLUTION_STATUS_OPEN:
         errors.append(
             f"predictor_command_resolution.status must remain {RESOLUTION_STATUS_OPEN!r} until "
-            f"paper/source resolves §10; got {resolution.status!r}"
+            f"paper/source resolves plan §9 ũ; got {resolution.status!r}"
         )
     if resolution.status_description != RESOLUTION_STATUS_DESCRIPTION:
         errors.append(
@@ -138,7 +138,7 @@ def assert_plan_predictor_command_resolution(config: dict[str, Any]) -> None:
     if resolution.paper_exact:
         errors.append(
             "predictor_command_resolution.paper_exact must be false — "
-            "§10 mechanism must not be labeled paper-exact while status is OPEN"
+            "§9 ũ mechanism must not be labeled paper-exact while status is OPEN"
         )
     if resolution.selected_source not in resolution.candidates:
         errors.append(
@@ -163,7 +163,7 @@ def assert_plan_predictor_command_resolution(config: dict[str, Any]) -> None:
         )
 
     if errors:
-        raise ValueError("Plan §10 predictor command resolution invalid:\n  - " + "\n  - ".join(errors))
+        raise ValueError("Plan §9 predictor command resolution invalid:\n  - " + "\n  - ".join(errors))
 
 
 def select_predictor_conditioning_commands(
@@ -180,12 +180,12 @@ def select_predictor_conditioning_commands(
         return batch["teacher_commands_norm"]
     if resolution.selected_source == "semantic_actor":
         raise NotImplementedError(
-            "command_source=semantic_actor is a plan §10 candidate but not implemented. "
+            "command_source=semantic_actor is a plan §9 candidate but not implemented. "
             "Use teacher_dp for the current baseline or add an ablation implementation."
         )
     if resolution.selected_source == "sequential_actor_predictor":
         raise NotImplementedError(
-            "command_source=sequential_actor_predictor is a plan §10 candidate but not implemented."
+            "command_source=sequential_actor_predictor is a plan §9 candidate but not implemented."
         )
     if resolution.selected_source == "recovered_from_source":
         raise NotImplementedError(

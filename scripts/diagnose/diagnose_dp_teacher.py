@@ -214,10 +214,28 @@ def main() -> None:
     pass_d = bool(pass_d and (q_act < q0 - 1e-9))
 
     # ------------------------------------------------------------------ E
+    from ts_jepa.evaluation.metrics import control_score
+
+    pos_tol = float(config.get("evaluation", {}).get("control_position_tol", 0.05))
+    ang_tol = float(config.get("evaluation", {}).get("control_angle_tol", 0.05))
+    xd = float(np.asarray(config["simulation"]["desired_state"], dtype=np.float64)[0])
+
+    def _eq28_scores(states_arr: np.ndarray) -> dict[str, float]:
+        scores = [
+            control_score(s, desired_x=xd, position_tol=pos_tol, angle_tol=ang_tol)
+            for s in np.asarray(states_arr)
+        ]
+        return {
+            "mean_control_score": float(np.mean(scores)) if scores else float("nan"),
+            "num_steps": int(len(scores)),
+            "num_in_band": int(np.sum(scores)),
+        }
+
     traj = env.rollout(teacher, steps=100, seed=10000)
     cmds = traj["commands"]
     states = traj["states"]
     finite = bool(np.isfinite(states).all() and np.isfinite(cmds).all())
+    eq28 = _eq28_scores(states)
     report["rollout_seed_10000"] = {
         "command_min": float(cmds.min()),
         "command_max": float(cmds.max()),
@@ -232,6 +250,7 @@ def main() -> None:
         "x_before": float(states[0, 0]),
         "x_after": float(states[-1, 0]),
         "numerically_bounded": finite,
+        "eq28": eq28,
     }
     pass_e = bool(
         float(cmds.std()) > 0.0
@@ -255,9 +274,11 @@ def main() -> None:
                 "command_mean": float(tr["commands"].mean()),
                 "command_std": float(tr["commands"].std()),
                 "command_unique": [float(u) for u in np.unique(tr["commands"])],
+                "eq28_mean_control_score": _eq28_scores(tr["states"])["mean_control_score"],
             }
         )
     report["perturbed_rollouts"] = pert
+    report["perturbed_eq28_mean"] = float(np.mean([p["eq28_mean_control_score"] for p in pert]))
 
     report["pass"] = {
         "A_policy_diversity": pass_a,

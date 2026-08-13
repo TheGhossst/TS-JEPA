@@ -3,14 +3,17 @@
 Evaluate a frozen JEPA + Semantic Actor pair.
 
 Modes:
-  baseline     — plan §16 checks: NMAE + closed-loop + t-SNE + validation gate (default)
+  baseline     — plan §15 checks: MAPE, NMAE, closed-loop, t-SNE, comm bits, validation gate (default)
   all          — alias for baseline
   nmae         — prediction-horizon NMAE only (+ plot)
   closed_loop  — frozen closed-loop control scores only
+  closed_loop_diagnostic — full-info RGB closed loop + actor vs DP teacher (debug)
   tsne         — embedding t-SNE diagnostic only
-  wireless     — channel-aware / RR / opportunistic vs SNR (requires --force-wireless)
+  fig4         — Fig. 4 consecutive-frame MAPE at IC sampling rates (no checkpoints)
+  wireless     — TS-JEPA under channel-aware / RR / opportunistic vs SNR (not §16 conventional control)
 
-Wireless evaluation is gated behind baseline validation (plan §16–§17).
+Wireless evaluation is gated behind baseline validation (plan §15).
+§16 round-robin / opportunistic with hold-last conventional control: scripts/pipeline/run_paper_experiments.py
 Use --include-wireless with baseline/all after validation passes.
 """
 
@@ -20,13 +23,15 @@ import argparse
 import json
 from pathlib import Path
 
-from ts_jepa.config import actor_run_dirname, jepa_run_dirname, load_config, project_root
+from ts_jepa.config import actor_run_dirname, load_config, project_root
 from ts_jepa.device import describe_device, select_device
-from ts_jepa.evaluation.checkpoints import resolve_run_checkpoint
+from ts_jepa.evaluation.checkpoints import resolve_jepa_checkpoint_from_actor, resolve_run_checkpoint
 from ts_jepa.evaluation.evaluate import (
     baseline_report,
     evaluate_closed_loop,
+    evaluate_closed_loop_full_information_diagnostic,
     evaluate_embedding_tsne,
+    evaluate_fig4_sampling_rate_mape,
     evaluate_prediction_horizon_nmae,
     evaluate_with_scheduler,
     validate_baseline,
@@ -35,6 +40,8 @@ from ts_jepa.evaluation.evaluate import (
 from ts_jepa.evaluation.metrics import summarize_scores
 from ts_jepa.evaluation.plotting import plot_embedding_tsne, plot_nmae_by_horizon, plot_wireless_control_scores
 from ts_jepa.inference.infer import FrozenRuntimeController
+from ts_jepa.plan.baseline_validation import assert_plan_baseline_validation_config
+from ts_jepa.plan.wireless import assert_plan_wireless_config
 
 
 def main() -> None:
@@ -52,7 +59,7 @@ def main() -> None:
         "--mode",
         type=str,
         default="baseline",
-        choices=("baseline", "all", "nmae", "closed_loop", "tsne", "wireless"),
+        choices=("baseline", "all", "nmae", "closed_loop", "closed_loop_diagnostic", "tsne", "fig4", "wireless"),
     )
     parser.add_argument(
         "--include-wireless",
@@ -74,23 +81,36 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config(args.config)
+    assert_plan_baseline_validation_config(config)
+    assert_plan_wireless_config(config)
     root = project_root(config)
     runs_root = root / config["paths"]["runs_root"]
     out_dir = Path(args.out_dir) if args.out_dir else runs_root / "eval"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    jepa_ckpt = resolve_run_checkpoint(
-        runs_root,
-        jepa_run_dirname(config),
-        explicit=Path(args.jepa_checkpoint) if args.jepa_checkpoint else None,
-        seed=args.seed,
-    )
+    if args.mode == "fig4":
+        report = evaluate_fig4_sampling_rate_mape(config)
+        fig4_json = out_dir / "fig4_mape.json"
+        with fig4_json.open("w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2)
+        from ts_jepa.evaluation.plotting import plot_fig4_mape
+
+        plot_path = plot_fig4_mape(report, out_dir / "fig4_mape.png")
+        print(json.dumps({"fig4_mape": report, "plot": str(plot_path)}, indent=2, default=str))
+        return
+
     actor_ckpt = resolve_run_checkpoint(
         runs_root,
         actor_run_dirname(config),
         explicit=Path(args.actor_checkpoint) if args.actor_checkpoint else None,
         seed=args.seed,
     )
+    if args.jepa_checkpoint is not None:
+        jepa_ckpt = Path(args.jepa_checkpoint).resolve()
+        if not jepa_ckpt.exists():
+            raise FileNotFoundError(f"JEPA checkpoint not found: {jepa_ckpt}")
+    else:
+        jepa_ckpt = resolve_jepa_checkpoint_from_actor(actor_ckpt, project_dir=root)
     device = select_device(args.device)
     print(json.dumps(describe_device(device), indent=2))
     print(f"jepa_checkpoint={jepa_ckpt}")
@@ -135,12 +155,20 @@ def main() -> None:
             out = evaluate_closed_loop(config, controller, seed=100 + r)
             scores.append(out["mean_control_score"])
             details.append({"seed": 100 + r, "mean_control_score": out["mean_control_score"]})
-        control = summarize_scores(scores)
+        control = summarize_scores(scores, reported_result=str(config.get("evaluation", {}).get("reported_result", "best")))
         control["runs"] = details
         path = out_dir / "closed_loop_report.json"
         with path.open("w", encoding="utf-8") as handle:
             json.dump(control, handle, indent=2)
         print(json.dumps(control, indent=2))
+        return
+
+    if args.mode == "closed_loop_diagnostic":
+        report = evaluate_closed_loop_full_information_diagnostic(config, controller)
+        path = out_dir / "closed_loop_full_info_diagnostic.json"
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2)
+        print(json.dumps(report, indent=2))
         return
 
     # wireless
@@ -159,7 +187,10 @@ def main() -> None:
             )
             wireless[policy][str(snr)] = {
                 "mean_control_score": out["mean_control_score"],
-                "schedule_receive_rate": out["schedule_receive_rate"],
+                "schedule_rate": out["schedule_rate"],
+                "packet_receive_rate": out["packet_receive_rate"],
+                "scheduled_outage_rate": out["scheduled_outage_rate"],
+                "schedule_receive_rate": out["packet_receive_rate"],
             }
     wireless_json = out_dir / "wireless_report.json"
     with wireless_json.open("w", encoding="utf-8") as handle:

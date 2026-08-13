@@ -5,11 +5,12 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from ts_jepa.config import load_config
 from ts_jepa.data.datasets import fit_command_normalizer
-from ts_jepa.data.trajectory_generator import build_env_and_teacher, generate_dataset_split
+from ts_jepa.data.trajectory_generator import build_env_and_teacher, dataset_split_index_plan, generate_dataset_split
 from ts_jepa.evaluation.evaluate import baseline_report
 from ts_jepa.inference.infer import FrozenRuntimeController
 from ts_jepa.training.train_actor import train_semantic_actor_repetitions
@@ -46,10 +47,18 @@ def test_end_to_end_smoke(tmp_path: Path):
 
     root = Path(config["paths"]["data_root"])
     env, teacher = build_env_and_teacher(config)
-    generate_dataset_split(config, "jepa_train", 4, 0, root / "trajectories" / "jepa" / "train", env, teacher)
-    generate_dataset_split(config, "jepa_test", 2, 4, root / "trajectories" / "jepa" / "test", env, teacher)
-    generate_dataset_split(config, "actor_train", 3, 0, root / "trajectories" / "actor" / "train", env, teacher)
-    generate_dataset_split(config, "actor_test", 1, 3, root / "trajectories" / "actor" / "test", env, teacher)
+    index_plan = dataset_split_index_plan(config)
+    mapping = {
+        "jepa_train": ("jepa", "train"),
+        "jepa_test": ("jepa", "test"),
+        "actor_train": ("actor", "train"),
+        "actor_test": ("actor", "test"),
+    }
+    for split_name, (family, split) in mapping.items():
+        count, start = index_plan[split_name]
+        generate_dataset_split(
+            config, split_name, count, start, root / "trajectories" / family / split, env, teacher
+        )
 
     fit_command_normalizer(config, data_root=root)
     jepa_summary = train_ts_jepa_repetitions(
@@ -82,13 +91,32 @@ def test_end_to_end_smoke(tmp_path: Path):
     assert report["prediction_horizon_nmae"]["kp"] == 5
     assert "nmae_by_horizon" in report["prediction_horizon_nmae"]
     assert set(report["prediction_horizon_nmae"]["nmae_by_horizon"]) == {str(h) for h in range(1, 6)}
+    assert set(report["prediction_horizon_nmae"]["latent_cosine_by_horizon"]) == {str(h) for h in range(1, 6)}
+    assert report["prediction_horizon_nmae"]["nmae_denominator"] == 40.0
+    assert report["prediction_horizon_nmae"]["denormalized"] is True
+    assert np.isfinite(report["prediction_horizon_nmae"]["latent_cosine_mean"])
     assert report["prediction_horizon_nmae"]["split"] == "jepa_test_untouched"
     assert "test_losses" in report
     assert report["test_losses"]["jepa"]["best_test_loss"] is not None
     assert report["test_losses"]["semantic_actor"]["best_test_loss"] is not None
     assert report["test_losses"]["jepa"]["source"] == "repetition_summary"
     assert "baseline_validation" in report
+    assert "fig4_mape" in report
     assert "embedding_tsne" in report
+    assert "actor_nmae" in report
+    assert "stability" in report
+    assert report["communication_bits"]["reduction_ratio"] > 1.0
+    assert "fig4_mape" in report
+    assert set(report["baseline_validation"]["required_checks"]) >= {
+        "embedding_quality_tsne",
+        "consecutive_frame_mape",
+        "fig4_sampling_rate_mape",
+        "actor_prediction_nmae",
+        "control_performance",
+        "horizon_prediction_1_to_Kp",
+        "communication_reduction",
+        "closed_loop_stability",
+    }
     resolution = report["predictor_command_resolution"]
     assert resolution["status"] == "OPEN"
     assert resolution["selected_source"] == "teacher_dp"

@@ -63,22 +63,40 @@ python scripts/pipeline/train_jepa.py --config configs/ts_jepa_dp_fixed.yaml --d
 
 The 5-seed protocol skips seeds that already finished (final `last.pt` with `test_loss`). Completed seeds are not retrained unless you remove their run directory.
 
-### Semantic actor training (5 seeds × 300 epochs)
+### Semantic actor (SAM) — debug on JEPA seed 0, then final 5-seed training
 
-Full 5-seed protocol (selects best validation MSE → `runs/semantic_actor_dp_fixed/best.pt`). Uses `runs/ts_jepa_dp_fixed/best.pt` unless `--jepa-checkpoint` is set:
-
-```powershell
-python scripts/pipeline/train_actor.py --config configs/ts_jepa_dp_fixed.yaml --device cuda
-```
-
-Single seed:
+**Debug now** (JEPA seed 0 encoder, while JEPA seeds 1–4 continue):
 
 ```powershell
-python scripts/pipeline/train_actor.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --single-seed 0
+python scripts/pipeline/train_actor.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --single-seed 0 --jepa-checkpoint runs/ts_jepa_dp_fixed/seed_0/best.pt
 ```
 
 ```powershell
-python scripts/pipeline/train_actor.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --single-seed 0 --jepa-checkpoint runs/ts_jepa_dp_fixed/best.pt
+python scripts/pipeline/eval_runtime.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --mode nmae --jepa-checkpoint runs/ts_jepa_dp_fixed/seed_0/best.pt --actor-checkpoint runs/semantic_actor_dp_fixed/seed_0/best.pt --out-dir runs/eval/sam_debug_seed0
+```
+
+```powershell
+python scripts/pipeline/eval_runtime.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --mode closed_loop --jepa-checkpoint runs/ts_jepa_dp_fixed/seed_0/best.pt --actor-checkpoint runs/semantic_actor_dp_fixed/seed_0/best.pt --out-dir runs/eval/sam_debug_seed0
+```
+
+```powershell
+python scripts/pipeline/eval_runtime.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --mode tsne --jepa-checkpoint runs/ts_jepa_dp_fixed/seed_0/best.pt --actor-checkpoint runs/semantic_actor_dp_fixed/seed_0/best.pt --out-dir runs/eval/sam_debug_seed0
+```
+
+```powershell
+python scripts/pipeline/eval_runtime.py --config configs/ts_jepa_dp_fixed.yaml --mode fig4 --out-dir runs/eval
+```
+
+**Final SAM** after all 5 JEPA seeds (uses selected `runs/ts_jepa_dp_fixed/best.pt`):
+
+```powershell
+python scripts/pipeline/train_actor.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --jepa-checkpoint runs/ts_jepa_dp_fixed/best.pt
+```
+
+**Baseline validation (plan §15) before wireless:**
+
+```powershell
+python scripts/pipeline/eval_runtime.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --mode baseline --jepa-checkpoint runs/ts_jepa_dp_fixed/best.pt --actor-checkpoint runs/semantic_actor_dp_fixed/best.pt --out-dir runs/eval
 ```
 
 ### Partial / resume pipeline
@@ -92,6 +110,21 @@ python scripts/pipeline/run_full_baseline.py --config configs/ts_jepa_dp_fixed.y
 
 # Override epoch count (smoke / debug only)
 python scripts/pipeline/run_full_baseline.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --jepa-epochs 3
+```
+
+## Plan §16–§17 baselines / Figs. 6–11
+
+```powershell
+python scripts/pipeline/train_supervised.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --kappa 2
+python scripts/pipeline/train_supervised.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --kappa 4
+python scripts/pipeline/train_autoencoder.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --kappa 2
+python scripts/pipeline/run_paper_experiments.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --experiment dp --out-dir runs/eval/paper_experiments
+python scripts/pipeline/run_paper_experiments.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --experiment fig6 --out-dir runs/eval/paper_experiments --jepa-checkpoint runs/ts_jepa_dp_fixed/best.pt --actor-checkpoint runs/semantic_actor_dp_fixed/best.pt --supervised-kappa2 runs/baselines/supervised_kappa2/seed_0/best.pt --supervised-kappa4 runs/baselines/supervised_kappa4/seed_0/best.pt --autoencoder-checkpoint runs/baselines/autoencoder_kappa2/seed_0/best.pt
+python scripts/pipeline/run_paper_experiments.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --experiment train_fig7 --out-dir runs/eval/paper_experiments
+python scripts/pipeline/run_paper_experiments.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --experiment train_fig8 --out-dir runs/eval/paper_experiments
+python scripts/pipeline/run_paper_experiments.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --experiment fig9 --out-dir runs/eval/paper_experiments --jepa-checkpoint runs/ts_jepa_dp_fixed/best.pt --actor-checkpoint runs/semantic_actor_dp_fixed/best.pt
+python scripts/pipeline/run_paper_experiments.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --experiment fig10 --out-dir runs/eval/paper_experiments --jepa-checkpoint runs/ts_jepa_dp_fixed/best.pt --actor-checkpoint runs/semantic_actor_dp_fixed/best.pt --supervised-kappa2 runs/baselines/supervised_kappa2/seed_0/best.pt
+python scripts/pipeline/run_paper_experiments.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --experiment fig11 --snr 10 --out-dir runs/eval/paper_experiments --jepa-checkpoint runs/ts_jepa_dp_fixed/best.pt --actor-checkpoint runs/semantic_actor_dp_fixed/best.pt --supervised-kappa2 runs/baselines/supervised_kappa2/seed_0/best.pt
 ```
 
 ## Dev scripts

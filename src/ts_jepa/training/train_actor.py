@@ -7,7 +7,6 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import Subset
 from tqdm import tqdm
 
 from ts_jepa.config import actor_run_dirname, jepa_run_dirname, project_root
@@ -17,6 +16,7 @@ from ts_jepa.evaluation.checkpoints import resolve_run_checkpoint
 from ts_jepa.models.actor import SemanticActor
 from ts_jepa.models.ts_jepa import TSJEPA
 from ts_jepa.plan.actor import PLAN_SEMANTIC_ACTOR
+from ts_jepa.training.actor_helpers import evaluate_mse, mean_command_baseline_mse, split_train_val_actor
 from ts_jepa.runtime import (
     CUDAPrefetcher,
     DataLoaderStallError,
@@ -25,6 +25,7 @@ from ts_jepa.runtime import (
     configure_training_runtime,
     format_exception,
     gpu_mem_str,
+    load_checkpoint,
     make_dataloader,
     reraise_cuda_context,
     save_checkpoint,
@@ -40,59 +41,24 @@ def _set_seed(seed: int) -> None:
 
 
 def _assert_encoder_frozen(jepa: TSJEPA) -> None:
-    """Plan §14 / §15: TS-JEPA encoder must be frozen; only Cε is optimized."""
+    """Plan §12: TS-JEPA encoder is no longer updated; only Cε is optimized."""
     trainable = [n for n, p in jepa.named_parameters() if p.requires_grad]
     if trainable:
         raise RuntimeError(
-            "plan §14 requires frozen TS-JEPA during actor training; "
+            "plan §12 requires frozen TS-JEPA during actor training; "
             f"trainable JEPA params remain: {trainable[:8]}"
         )
 
 
 def _assert_optimizer_only_actor(optimizer: torch.optim.Optimizer, actor: SemanticActor) -> None:
-    """Plan §15: optimize only Cε."""
+    """Plan §12: optimize only Cε."""
     actor_ids = {id(p) for p in actor.parameters()}
     opt_ids = {id(p) for group in optimizer.param_groups for p in group["params"]}
     if opt_ids != actor_ids:
         raise RuntimeError(
-            "plan §15 requires optimizer to cover exactly SemanticActor parameters "
+            "plan §12 requires optimizer to cover exactly SemanticActor parameters "
             f"(actor={len(actor_ids)}, optimizer={len(opt_ids)})"
         )
-
-
-def _split_train_val_actor(dataset: ActorEmbeddingDataset, val_fraction: float) -> tuple[Subset, Subset]:
-    """
-    Hold out a fraction of the actor TRAIN embeddings for early stopping.
-
-    Count/fraction is IMPLEMENTATION CHOICE. Untouched actor test trajectories
-    are never used for model selection.
-    """
-    n = len(dataset)
-    n_val = max(1, int(round(n * val_fraction)))
-    n_val = min(n_val, max(1, n - 1)) if n > 1 else 1
-    indices = list(range(n))
-    val_idx = indices[-n_val:]
-    train_idx = indices[:-n_val] if n > n_val else indices
-    return Subset(dataset, train_idx), Subset(dataset, val_idx)
-
-
-@torch.no_grad()
-def evaluate_mse(actor: SemanticActor, loader, device: torch.device, criterion: nn.Module) -> float:
-    actor.eval()
-    total = 0.0
-    n_batches = 0
-    try:
-        for batch in CUDAPrefetcher(loader, device):
-            emb = batch["embedding"]
-            target = batch["command_norm"]
-            pred = actor(emb)
-            total += float(criterion(pred, target).item())
-            n_batches += 1
-    except DataLoaderStallError:
-        raise
-    except Exception as exc:
-        reraise_cuda_context(exc, where=f"evaluate_mse after {n_batches} batches", device=device)
-    return total / max(1, n_batches)
 
 
 def train_semantic_actor(
@@ -176,6 +142,7 @@ def _train_semantic_actor_body(
             project_root(config) / config["paths"]["runs_root"],
             jepa_run_dirname(config),
         )
+    ckpt_path = ckpt_path.resolve()
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     jepa = TSJEPA(config).to(device)
     jepa.load_state_dict(ckpt["model"])
@@ -187,12 +154,15 @@ def _train_semantic_actor_body(
     normalizer = load_command_normalizer(config, data_root=root)
     train_dir = root / "trajectories" / "actor" / "train"
     test_dir = root / "trajectories" / "actor" / "test"
-    # Plan §15: x → frozen Ψθ → z (cached here) → Cε → ũ
+    # Plan §12: D_a from trained Ψθ (no further encoder updates); cache embeddings then drop JEPA.
     train_full = ActorEmbeddingDataset(train_dir, config, normalizer, jepa.context_encoder, device, training=True)
     test_ds = ActorEmbeddingDataset(test_dir, config, normalizer, jepa.context_encoder, device, training=False)
+    del jepa
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
 
     val_fraction = float(config["semantic_actor"]["early_stopping"].get("val_fraction", 0.2))
-    train_ds, val_ds = _split_train_val_actor(train_full, val_fraction)
+    train_ds, val_ds = split_train_val_actor(train_full, val_fraction)
 
     opt_cfg = config["semantic_actor"]["optimizer"]
     actor = SemanticActor.from_config(config).to(device)
@@ -205,7 +175,7 @@ def _train_semantic_actor_body(
 
     if str(opt_cfg.get("type", "AdamW")) != "AdamW":
         raise ValueError(
-            f"plan §15 requires AdamW for the semantic actor; got {opt_cfg.get('type')!r}"
+            f"plan §12 requires AdamW for the semantic actor; got {opt_cfg.get('type')!r}"
         )
     optimizer = torch.optim.AdamW(
         actor.parameters(),
@@ -213,10 +183,10 @@ def _train_semantic_actor_body(
         weight_decay=float(opt_cfg.get("weight_decay", 0.01)),
     )
     _assert_optimizer_only_actor(optimizer, actor)
-    # Plan §14: L_actor = MSE(ũ, u) — trained in normalized command domain (IC).
+    # Plan §12 Eq. 15: L_actor = MSE(ũ, u) in physical Newtons.
     if str(config["semantic_actor"].get("loss", "MSE")) != "MSE":
         raise ValueError(
-            f"plan §14 requires MSE actor loss; got {config['semantic_actor'].get('loss')!r}"
+            f"plan §12 requires MSE actor loss; got {config['semantic_actor'].get('loss')!r}"
         )
     criterion = nn.MSELoss()
     batch_size = int(opt_cfg["batch_size"])
@@ -267,7 +237,7 @@ def _train_semantic_actor_body(
                 watchdog.touch(micro=n_batches + 1, stage="train")
                 try:
                     emb = batch["embedding"]
-                    target = batch["command_norm"]
+                    target = batch["command"]
                     pred = actor(emb)
                     loss = criterion(pred, target)
                     optimizer.zero_grad(set_to_none=True)
@@ -305,7 +275,7 @@ def _train_semantic_actor_body(
                 runs / "best.pt",
                 {
                     "actor": best_state,
-                    "jepa_checkpoint": str(ckpt_path),
+                    "jepa_checkpoint": str(ckpt_path.resolve()),
                     "normalizer": normalizer.to_dict(),
                     "config": config,
                     "val_loss": best_val,
@@ -329,18 +299,32 @@ def _train_semantic_actor_body(
         test_loss = evaluate_mse(actor, test_loader, device, criterion)
     except Exception as exc:
         reraise_cuda_context(exc, where="actor untouched test", device=device)
+
+    train_targets = np.asarray([float(s[1]) for s in train_full.samples], dtype=np.float64)
+    test_targets = np.asarray([float(s[1]) for s in test_ds.samples], dtype=np.float64)
+    train_mean_norm = float(train_targets.mean()) if train_targets.size else float("nan")
+    mean_baseline_train = mean_command_baseline_mse(train_targets, train_mean_norm)
+    mean_baseline_test = mean_command_baseline_mse(test_targets, train_mean_norm)
+    beats_mean_baseline = bool(
+        np.isfinite(test_loss) and np.isfinite(mean_baseline_test) and test_loss < mean_baseline_test
+    )
+
     save_checkpoint(
         runs / "last.pt",
         {
             "actor": state_dict_to_cpu(actor.state_dict()),
-            "jepa_checkpoint": str(ckpt_path),
+            "jepa_checkpoint": str(ckpt_path.resolve()),
             "normalizer": normalizer.to_dict(),
             "config": config,
             "val_loss": best_val,
             "test_loss": test_loss,
             "seed": seed,
+            "epoch": int(best_epoch),
             "history": history,
             "selection_split": "actor_train_holdout_validation",
+            "mean_command_baseline_mse_train": mean_baseline_train,
+            "mean_command_baseline_mse_test": mean_baseline_test,
+            "beats_mean_command_baseline": beats_mean_baseline,
         },
     )
     with (runs / "metrics.json").open("w", encoding="utf-8") as handle:
@@ -351,6 +335,9 @@ def _train_semantic_actor_body(
                 "best_epoch": best_epoch,
                 "test_loss": test_loss,
                 "history": history,
+                "mean_command_baseline_mse_train": mean_baseline_train,
+                "mean_command_baseline_mse_test": mean_baseline_test,
+                "beats_mean_command_baseline": beats_mean_baseline,
             },
             handle,
             indent=2,
@@ -363,6 +350,39 @@ def _train_semantic_actor_body(
         "runs_dir": str(runs),
         "seed": seed,
         "checkpoint": str(runs / "best.pt"),
+        "mean_command_baseline_mse_test": mean_baseline_test,
+        "beats_mean_command_baseline": beats_mean_baseline,
+    }
+
+
+def seed_actor_training_complete(run_dir: Path, expected_epochs: int) -> bool:
+    """True when an actor seed finished the requested epoch budget and wrote last.pt + test_loss."""
+    metrics_path = run_dir / "metrics.json"
+    last_path = run_dir / "last.pt"
+    if not metrics_path.is_file() or not last_path.is_file():
+        return False
+    checkpoint = load_checkpoint(last_path)
+    if "test_loss" not in checkpoint:
+        return False
+    history = checkpoint.get("history") or []
+    history_epochs = len(history)
+    epoch = int(checkpoint.get("epoch") or history_epochs)
+    reached = max(epoch, history_epochs)
+    return reached >= int(expected_epochs)
+
+
+def _load_completed_actor_seed_result(run_dir: Path) -> dict[str, Any]:
+    metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+    return {
+        "best_val": metrics["best_val"],
+        "best_epoch": metrics["best_epoch"],
+        "test_loss": metrics["test_loss"],
+        "history": metrics["history"],
+        "runs_dir": str(run_dir),
+        "seed": metrics["seed"],
+        "checkpoint": str(run_dir / "best.pt"),
+        "mean_command_baseline_mse_test": metrics.get("mean_command_baseline_mse_test"),
+        "beats_mean_command_baseline": metrics.get("beats_mean_command_baseline"),
     }
 
 
@@ -373,7 +393,7 @@ def train_semantic_actor_repetitions(
     max_epochs: int | None = None,
     data_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Paper protocol: repeat actor training, select best validation run."""
+    """Paper protocol (plan §12): repeat actor training, select best validation run."""
     reps = int(config["evaluation"]["repetitions"])
     seeds = list(config["evaluation"].get("seeds", list(range(reps))))[:reps]
     root_runs = project_root(config) / config["paths"]["runs_root"] / actor_run_dirname(config)
@@ -385,9 +405,16 @@ def train_semantic_actor_repetitions(
             project_root(config) / config["paths"]["runs_root"],
             jepa_run_dirname(config),
         )
+    expected_epochs = int(
+        max_epochs if max_epochs is not None else config["semantic_actor"]["optimizer"]["epochs"]
+    )
 
     seed_results = []
     for seed in seeds:
+        seed_dir = root_runs / f"seed_{seed}"
+        if seed_actor_training_complete(seed_dir, expected_epochs):
+            seed_results.append(_load_completed_actor_seed_result(seed_dir))
+            continue
         result = train_semantic_actor(
             config,
             jepa_checkpoint=ckpt_path,
@@ -395,7 +422,7 @@ def train_semantic_actor_repetitions(
             max_epochs=max_epochs,
             data_root=data_root,
             seed=int(seed),
-            run_dir=root_runs / f"seed_{seed}",
+            run_dir=seed_dir,
         )
         seed_results.append(result)
 

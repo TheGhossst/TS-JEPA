@@ -11,7 +11,7 @@ import torch
 
 from ts_jepa.config import load_config
 from ts_jepa.data.datasets import fit_command_normalizer
-from ts_jepa.data.trajectory_generator import build_env_and_teacher, generate_dataset_split
+from ts_jepa.data.trajectory_generator import build_env_and_teacher, dataset_split_index_plan, generate_dataset_split
 from ts_jepa.evaluation.evaluate import baseline_report
 from ts_jepa.inference.infer import FrozenRuntimeController
 from ts_jepa.models.ts_jepa import TSJEPA
@@ -51,18 +51,18 @@ def _tiny_config(tmp_path: Path) -> dict:
 def _generate(config: dict) -> Path:
     root = Path(config["paths"]["data_root"])
     env, teacher = build_env_and_teacher(config)
-    jepa_tr = config["ts_jepa"]["dataset"]["train_trajectories"]
-    jepa_te = config["ts_jepa"]["dataset"]["test_trajectories"]
-    act_tr = config["semantic_actor"]["dataset"]["train_trajectories"]
-    act_te = config["semantic_actor"]["dataset"]["test_trajectories"]
-    generate_dataset_split(config, "jepa_train", jepa_tr, 0, root / "trajectories" / "jepa" / "train", env, teacher)
-    generate_dataset_split(
-        config, "jepa_test", jepa_te, jepa_tr, root / "trajectories" / "jepa" / "test", env, teacher
-    )
-    generate_dataset_split(config, "actor_train", act_tr, 0, root / "trajectories" / "actor" / "train", env, teacher)
-    generate_dataset_split(
-        config, "actor_test", act_te, act_tr, root / "trajectories" / "actor" / "test", env, teacher
-    )
+    index_plan = dataset_split_index_plan(config)
+    mapping = {
+        "jepa_train": ("jepa", "train"),
+        "jepa_test": ("jepa", "test"),
+        "actor_train": ("actor", "train"),
+        "actor_test": ("actor", "test"),
+    }
+    for split_name, (family, split) in mapping.items():
+        count, start = index_plan[split_name]
+        generate_dataset_split(
+            config, split_name, count, start, root / "trajectories" / family / split, env, teacher
+        )
     fit_command_normalizer(config, data_root=root)
     return root
 
@@ -106,8 +106,13 @@ def test_generated_counts_and_no_train_test_leakage(tmp_path: Path):
 
     assert jepa_train_ids.isdisjoint(jepa_test_ids)
     assert actor_train_ids.isdisjoint(actor_test_ids)
-    # Generation uses disjoint index ranges within each task.
+    assert jepa_train_ids.isdisjoint(actor_train_ids)
+    assert jepa_train_ids.isdisjoint(actor_test_ids)
+    assert jepa_test_ids.isdisjoint(actor_train_ids)
+    assert jepa_test_ids.isdisjoint(actor_test_ids)
+    # Generation uses disjoint index ranges across D_s then D_a.
     assert max(jepa_train_ids) < min(jepa_test_ids)
+    assert max(jepa_test_ids) < min(actor_train_ids)
     assert max(actor_train_ids) < min(actor_test_ids)
 
 

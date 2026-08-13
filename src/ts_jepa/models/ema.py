@@ -9,7 +9,7 @@ import torch.nn as nn
 
 def initialize_target_from_context(context_encoder: nn.Module) -> nn.Module:
     """
-    Plan §7: θ̄ ← θ — clone context encoder weights into the target encoder.
+    Plan §8: θ̄ ← θ — clone context encoder weights into the target encoder.
 
     Target parameters are frozen (no backprop) and the module stays in eval mode.
     """
@@ -26,7 +26,7 @@ def clone_encoder(encoder: nn.Module) -> nn.Module:
 
 
 def assert_target_initialized_from_context(context_encoder: nn.Module, target_encoder: nn.Module) -> None:
-    """Verify plan §7 initialization θ̄ ← θ."""
+    """Verify plan §8 initialization θ̄ ← θ."""
     for t_param, c_param in zip(target_encoder.parameters(), context_encoder.parameters()):
         if not torch.equal(t_param.data, c_param.data):
             raise AssertionError("Target encoder parameters differ from context encoder at initialization")
@@ -37,16 +37,19 @@ def assert_target_initialized_from_context(context_encoder: nn.Module, target_en
 
 def ema_update(target: nn.Module, online: nn.Module, decay: float = 0.99) -> None:
     """
-    Plan §7: θ̄ ← η θ̄ + (1 - η) θ with η = ema_decay.
+    Plan §8: θ̄ ← η θ̄ + (1 - η) θ with η = ema_decay.
 
-    BatchNorm running-stat buffers are copied from the online encoder each step
-    (IMPLEMENTATION CHOICE — plan specifies θ only).
+    BatchNorm running-stat buffers use the same EMA as θ (not a hard copy).
+    Non-float buffers (e.g. num_batches_tracked) are copied.
     """
     with torch.no_grad():
         for t_param, o_param in zip(target.parameters(), online.parameters()):
             t_param.data.mul_(decay).add_(o_param.data, alpha=1.0 - decay)
         for t_buf, o_buf in zip(target.buffers(), online.buffers()):
-            t_buf.data.copy_(o_buf.data)
+            if t_buf.dtype.is_floating_point:
+                t_buf.data.mul_(decay).add_(o_buf.data, alpha=1.0 - decay)
+            else:
+                t_buf.data.copy_(o_buf.data)
 
 
 def trainable_encoder_parameters(model: nn.Module) -> Iterable[nn.Parameter]:

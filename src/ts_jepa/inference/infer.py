@@ -21,24 +21,57 @@ class RuntimeCommandStats:
     force_min: float = -20.0
     force_max: float = 20.0
 
-    def denormalize_and_clip(self, u_norm: float | np.ndarray | torch.Tensor) -> float:
+    def denormalize(self, u_norm: float | np.ndarray | torch.Tensor) -> float:
+        """Plan §14: invert command z-score to Newtons."""
         if isinstance(u_norm, torch.Tensor):
             u_norm_v = float(u_norm.detach().cpu().reshape(-1)[0].item())
         elif isinstance(u_norm, np.ndarray):
             u_norm_v = float(np.asarray(u_norm).reshape(-1)[0])
         else:
             u_norm_v = float(u_norm)
-        u = u_norm_v * self.std + self.mean
-        return float(np.clip(u, self.force_min, self.force_max))
+        return float(u_norm_v * self.std + self.mean)
+
+    def apply_plant_force_limits(self, force_n: float) -> float:
+        """IMPLEMENTATION CHOICE: clip to paper u_min/u_max at the actuator."""
+        return float(np.clip(force_n, self.force_min, self.force_max))
+
+    def normalize(self, force_n: float) -> float:
+        return float((float(force_n) - self.mean) / self.std)
+
+    def actor_output_to_force_and_norm(self, u_actor: float | np.ndarray | torch.Tensor) -> tuple[float, float]:
+        """Eq. 15 actor emits Newtons; clip at the plant; z-score only for Pφ."""
+        if isinstance(u_actor, torch.Tensor):
+            raw = float(u_actor.detach().cpu().reshape(-1)[0].item())
+        elif isinstance(u_actor, np.ndarray):
+            raw = float(np.asarray(u_actor).reshape(-1)[0])
+        else:
+            raw = float(u_actor)
+        force = self.apply_plant_force_limits(raw)
+        return force, self.normalize(force)
+
+    def denormalize_and_clip(self, u_norm: float | np.ndarray | torch.Tensor) -> float:
+        return self.apply_plant_force_limits(self.denormalize(u_norm))
 
 
 class FrozenRuntimeController:
     """
-    Frozen TS-JEPA runtime with packet received / packet lost paths.
+    Plan §14 closed-loop remote control (weights not updated).
 
-    Packet received: x → Ψθ → z → Cε → denorm → clip
-    Packet lost:     z̃,ũ → Pφ → z̃' → Cε → denorm → clip
+    Device / context encoder Ψθ encodes the RGB state when an embedding is received.
+    Predictor Pφ and actor Cε run on the remote side.
+
+    Packet received: x_k → Ψθ → z → Cε → Newtons (clip)
+    Packet lost:     z̃, ũ → Pφ → z̃' → Cε → Newtons (clip)
+      (predicted commands for Pφ = z-score of last applied force; first-step miss → 0 N is IC)
+
+    The encoder lives on the device, so the RGB buffer is updated every
+    timestep. Transmission success only gates whether the remote uses the
+    new z or rolls Pφ.
+
+    Plant clip to [u_min, u_max] is IMPLEMENTATION CHOICE (env also clips).
     """
+
+    miss_behavior = "predict"
 
     def __init__(
         self,
@@ -66,6 +99,12 @@ class FrozenRuntimeController:
         self.last_command_norm: float = 0.0
         self.frame_buffer: list[np.ndarray] = []
 
+    def reset_episode(self) -> None:
+        """Clear temporal runtime state before starting an independent rollout."""
+        self.latent = None
+        self.last_command_norm = 0.0
+        self.frame_buffer.clear()
+
     @classmethod
     def from_checkpoints(
         cls,
@@ -89,7 +128,7 @@ class FrozenRuntimeController:
     def _context_from_buffer(self) -> torch.Tensor:
         frames = np.stack(self.frame_buffer, axis=0)
         t = len(frames) - 1
-        context = self.pipeline.make_context_tensor(frames, t, self.config["input"]["kappa"])
+        context = self.pipeline.make_jepa_frame(frames, t)
         return context.unsqueeze(0).to(self.device)
 
     def observe_frame(self, frame: np.ndarray) -> None:
@@ -99,30 +138,43 @@ class FrozenRuntimeController:
             self.frame_buffer = self.frame_buffer[-(kappa + 5) :]
 
     @torch.no_grad()
-    def step_packet_received(self, frame: np.ndarray) -> float:
-        self.observe_frame(frame)
+    def _act_from_device_encoding(self) -> float:
         context = self._context_from_buffer()
         z = self.jepa.encode_context(context)
-        u_norm = self.actor(z)
-        force = self.stats.denormalize_and_clip(u_norm)
+        u_actor = self.actor(z)
+        force, u_norm = self.stats.actor_output_to_force_and_norm(u_actor)
         self.latent = z
-        self.last_command_norm = float(u_norm.reshape(-1)[0].item())
+        self.last_command_norm = u_norm
         return force
+
+    @torch.no_grad()
+    def step_packet_received(self, frame: np.ndarray) -> float:
+        self.observe_frame(frame)
+        return self._act_from_device_encoding()
 
     @torch.no_grad()
     def step_packet_lost(self) -> float:
         if self.latent is None:
+            # IMPLEMENTATION CHOICE: no embedding yet, so no predicted command.
             return 0.0
         cmd = torch.tensor([[self.last_command_norm]], dtype=torch.float32, device=self.device)
         z_next = self.jepa.predictor.forward_step(self.latent, cmd)
-        u_norm = self.actor(z_next)
-        force = self.stats.denormalize_and_clip(u_norm)
+        u_actor = self.actor(z_next)
+        force, u_norm = self.stats.actor_output_to_force_and_norm(u_actor)
         self.latent = z_next
-        self.last_command_norm = float(u_norm.reshape(-1)[0].item())
+        self.last_command_norm = u_norm
         return force
 
-    def step(self, frame: np.ndarray | None, packet_received: bool) -> float:
+    def step(
+        self,
+        frame: np.ndarray | None,
+        packet_received: bool,
+        plant_state: np.ndarray | None = None,
+    ) -> float:
+        # Device always observes RGB; the remote only receives z on success.
+        del plant_state  # TS-JEPA control is embedding-only (plan §12/§14).
+        if frame is not None:
+            self.observe_frame(frame)
         if packet_received:
-            assert frame is not None
-            return self.step_packet_received(frame)
+            return self._act_from_device_encoding()
         return self.step_packet_lost()

@@ -49,7 +49,7 @@ def main() -> None:
     args = parser.parse_args()
     config = load_config(args.config)
     assert_plan_semantic_actor_config(config)
-    # Full plan §15 table only when not using smoke epoch overrides.
+    # Full plan §12 Table III only when not using smoke epoch overrides.
     if args.epochs is None:
         assert_plan_semantic_actor_training_config(config)
     apply_cli_path_overrides(config, data_root=args.data_root, runs_root=args.runs_root)

@@ -24,6 +24,7 @@ def test_plan_predictor_config_matches_baseline_yaml():
 
 def test_predictor_mlp_layer_sizes():
     pred = Predictor()
+    # 257 = concat(z, u) width: implementation choice (plan §18), not paper-specified.
     assert pred.fc_in.in_features == 257
     assert pred.fc_in.out_features == 1024
     assert pred.fc_out.in_features == 1024
@@ -79,5 +80,19 @@ def test_tsjepa_predictor_wired_from_config():
 def test_plan_predictor_config_rejects_wrong_hidden_dim():
     config = copy.deepcopy(load_config())
     config["ts_jepa"]["predictor"]["hidden_dim"] = 512
-    with pytest.raises(ValueError, match="Plan §9"):
+    with pytest.raises(ValueError, match="hidden_dim"):
         assert_plan_predictor_config(config)
+
+
+def test_plan_predictor_config_rejects_virtual_channel_input():
+    config = copy.deepcopy(load_config())
+    config["ts_jepa"]["predictor"]["inputs"] = ["embedding", "control_command", "virtual_channel_embeddings"]
+    with pytest.raises(ValueError, match="virtual_channel"):
+        assert_plan_predictor_config(config)
+
+
+def test_concat_fusion_is_not_a_plan_requirement():
+    """Plan §9: concat vs other fusion is NOT SPECIFIED."""
+    config = copy.deepcopy(load_config())
+    config["ts_jepa"]["predictor"]["input_tensor_construction"] = "other_fusion"
+    assert_plan_predictor_config(config)

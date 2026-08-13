@@ -142,7 +142,6 @@ def run_diagnostic(
     dataset = ConcatDataset([jepa_test, actor_test])
     assert len(dataset) == 5100, f"Expected 5100 contexts, got {len(dataset)}"
 
-    kappa = int(config["input"]["kappa"])
     jepa_states = _load_states_for_dataset(jepa_test)
     actor_states = _load_states_for_dataset(actor_test)
 
@@ -160,7 +159,7 @@ def run_diagnostic(
             frames = ds.frames[file_idx]
             cmds = ds.commands[file_idx]
             states = states_list[file_idx]
-            ctx_frames = _raw_context_frames(frames, time_index, kappa)
+            ctx_frames = [frames[time_index]]
             raw_hashes.append(_hash_raw_context(ctx_frames))
             raw_flat_u8.append(np.concatenate([np.ascontiguousarray(f).reshape(-1) for f in ctx_frames]))
             states_ti.append(states[time_index].copy())

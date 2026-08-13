@@ -53,7 +53,7 @@ class CartPoleODE:
         return out[0] if single else out
 
     def step(self, state: np.ndarray, force: float, process_noise_std: float = 0.0) -> np.ndarray:
-        """Semi-implicit Euler step. process_noise_std=0 for paper-faithful Ns=0 baseline."""
+        """Semi-implicit Euler step. process_noise_std=0 is an IC (paper Ns unspecified)."""
         single = state.ndim == 1
         s = state.reshape(-1, 4).astype(np.float64)
         force = float(np.clip(force, -20.0, 20.0))

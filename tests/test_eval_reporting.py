@@ -24,8 +24,12 @@ class _StubController:
 
     def __init__(self) -> None:
         self.device = "cpu"
+        self.reset_calls = 0
 
-    def step(self, frame: np.ndarray | None, packet_received: bool) -> float:
+    def reset_episode(self) -> None:
+        self.reset_calls += 1
+
+    def step(self, frame: np.ndarray | None, packet_received: bool, plant_state=None) -> float:
         return 0.0
 
 
@@ -65,6 +69,36 @@ def test_closed_loop_init_noise_matches_simulation_config(monkeypatch: pytest.Mo
     monkeypatch.setattr(InvertedCartPoleEnv, "__init__", _capturing_init)
     evaluate_closed_loop(config, _StubController(), steps=1, seed=1)  # type: ignore[arg-type]
     assert seen == [0.27]
+
+
+def test_closed_loop_resets_controller_and_reports_score_accounting() -> None:
+    config = copy.deepcopy(load_config())
+    config["simulation"]["init_noise"] = 0.0
+    controller = _StubController()
+
+    out = evaluate_closed_loop(config, controller, steps=3, seed=100)  # type: ignore[arg-type]
+
+    assert controller.reset_calls == 1
+    assert out["num_steps"] == 3
+    assert out["controlled_steps"] == 3
+    assert out["scores"] == [1, 1, 1]
+    assert out["mean_control_score"] == pytest.approx(1.0)
+    assert out["initial_state"] == pytest.approx([0.0, 0.0, 0.0, 0.0])
+    assert out["final_state"] == pytest.approx([0.0, 0.0, 0.0, 0.0])
+
+
+def test_closed_loop_zero_scores_are_real_for_report_seeds_at_configured_noise() -> None:
+    config = copy.deepcopy(load_config())
+    config["simulation"]["init_noise"] = 0.35
+    controller = _StubController()
+
+    for seed in range(100, 105):
+        out = evaluate_closed_loop(config, controller, steps=100, seed=seed)  # type: ignore[arg-type]
+        assert out["num_steps"] == 100
+        assert len(out["scores"]) == 100
+        assert out["controlled_steps"] == 0
+        assert out["mean_control_score"] == pytest.approx(0.0)
+        assert np.all(np.isfinite(out["forces"]))
 
 
 def test_test_losses_fallback_to_seed_metrics(tmp_path: Path) -> None:
@@ -146,15 +180,66 @@ def test_baseline_report_single_seed_test_losses(tmp_path: Path, monkeypatch: py
 
     monkeypatch.setattr(
         "ts_jepa.evaluation.evaluate.evaluate_closed_loop",
-        lambda *args, **kwargs: {"mean_control_score": 0.0, "forces": [], "scores": []},
+        lambda *args, **kwargs: {"mean_control_score": 0.5, "forces": [0.0], "scores": [1, 0]},
     )
     monkeypatch.setattr(
         "ts_jepa.evaluation.evaluate.evaluate_prediction_horizon_nmae",
-        lambda *args, **kwargs: {"nmae": 1.0, "nmae_by_horizon": {"1": 1.0}, "kp": 1, "split": "jepa_test_untouched"},
+        lambda *args, **kwargs: {
+            "nmae": 1.0,
+            "nmae_by_horizon": {str(h): 1.0 for h in range(1, 16)},
+            "latent_cosine_mean": 0.1,
+            "latent_cosine_by_horizon": {str(h): 0.1 for h in range(1, 16)},
+            "kp": 15,
+            "split": "jepa_test_untouched",
+            "nmae_denominator": 40.0,
+            "denormalized": True,
+        },
+    )
+    monkeypatch.setattr(
+        "ts_jepa.evaluation.evaluate.evaluate_actor_nmae",
+        lambda *args, **kwargs: {
+            "nmae": 0.5,
+            "num_values": 10,
+            "split": "actor_test_untouched",
+            "nmae_denominator": 40.0,
+            "denormalized": True,
+        },
     )
     monkeypatch.setattr(
         "ts_jepa.evaluation.evaluate.evaluate_embedding_tsne",
-        lambda *args, **kwargs: {"num_samples": 10, "coords": [[0.0, 0.0]], "cart_positions": [0.0]},
+        lambda *args, **kwargs: {
+            "num_samples": 10,
+            "coords": [[0.0, 0.0]] * 10,
+            "cart_positions": [0.0] * 10,
+        },
+    )
+    monkeypatch.setattr(
+        "ts_jepa.evaluation.evaluate.evaluate_closed_loop_stability",
+        lambda *args, **kwargs: {
+            "passed": True,
+            "plan_section": "16.6",
+            "full_receive": {"mean_control_score": 0.5},
+            "intermittent_loss": {"mean_control_score": 0.25},
+        },
+    )
+    monkeypatch.setattr(
+        "ts_jepa.evaluation.evaluate.evaluate_consecutive_frame_mape",
+        lambda *args, **kwargs: {"mean_mape_percent": 1.2, "num_pairs": 10},
+    )
+    monkeypatch.setattr(
+        "ts_jepa.evaluation.evaluate.evaluate_fig4_sampling_rate_mape",
+        lambda *args, **kwargs: {
+            "by_sampling_interval_ms": {
+                "1.0": {
+                    "without_augmentation": {"mean_mape_percent": 1.0, "num_pairs": 10},
+                    "with_augmentation": {"mean_mape_percent": 2.0, "num_pairs": 10},
+                },
+                "2.0": {
+                    "without_augmentation": {"mean_mape_percent": 1.5, "num_pairs": 8},
+                    "with_augmentation": {"mean_mape_percent": 2.5, "num_pairs": 8},
+                },
+            }
+        },
     )
 
     report = baseline_report(config, _StubController(), data_root=Path(config["paths"]["data_root"]))  # type: ignore[arg-type]
@@ -163,4 +248,9 @@ def test_baseline_report_single_seed_test_losses(tmp_path: Path, monkeypatch: py
     assert report["test_losses"]["semantic_actor"]["source"] == "seed_metrics"
     assert report["test_losses"]["semantic_actor"]["best_test_loss"] == pytest.approx(0.715953)
     assert "baseline_validation" in report
+    assert report["baseline_validation"]["checks"]["actor_prediction_nmae"] is True
+    assert report["baseline_validation"]["checks"]["closed_loop_stability"] is True
     assert "wireless" not in report
+    assert "actor_nmae" in report
+    assert "stability" in report
+    assert report["communication_bits"]["reduction_ratio"] > 1.0

@@ -8,17 +8,17 @@ PLAN_PREDICTOR: dict[str, Any] = {
     "type": "MLP",
     "hidden_dim": 1024,
     "output_dim": 256,
-    "activation": "ReLU",
-    "input_construction": "concat_embedding_and_command",
+    "autoregressive": True,
     "forbidden_inputs": [
         "virtual_inputs",
         "virtual_channel_variables",
         "virtual_channel_embeddings",
         "unspecified_future_channel_features",
     ],
-    # Plan §10 OPEN — must be recorded, not claimed paper-exact.
-    "default_command_source": "teacher_dp",
 }
+
+# Hidden-layer nonlinearity is NOT SPECIFIED in plan §9 (actor ReLU is §12).
+IC_PREDICTOR_ACTIVATION = "ReLU"
 
 
 def assert_plan_predictor_config(config: dict[str, Any]) -> None:
@@ -34,23 +34,28 @@ def assert_plan_predictor_config(config: dict[str, Any]) -> None:
         errors.append(f"ts_jepa.predictor.hidden_dim: expected 1024, got {hidden}")
 
     out_dim = pred.get("output_dim")
-    if out_dim is None or int(out_dim) != PLAN_PREDICTOR["output_dim"]:
+    allow_grid = bool(config.get("experiments", {}).get("allow_non_baseline_embedding_dim", False))
+    if out_dim is None or (not allow_grid and int(out_dim) != PLAN_PREDICTOR["output_dim"]):
         errors.append(f"ts_jepa.predictor.output_dim: expected 256, got {out_dim}")
+
+    if pred.get("autoregressive") is False:
+        errors.append("ts_jepa.predictor.autoregressive must be true (plan §9)")
 
     emb = int(config.get("ts_jepa", {}).get("encoder", {}).get("embedding_dim", -1))
     if out_dim is not None and int(out_dim) != emb:
         errors.append(f"predictor.output_dim ({out_dim}) must match encoder.embedding_dim ({emb})")
 
-    construction = pred.get("input_tensor_construction")
-    if construction != PLAN_PREDICTOR["input_construction"]:
-        errors.append(
-            f"ts_jepa.predictor.input_tensor_construction: expected "
-            f"{PLAN_PREDICTOR['input_construction']!r}, got {construction!r}"
-        )
+    inputs = [str(x) for x in pred.get("inputs", [])]
+    for forbidden in PLAN_PREDICTOR["forbidden_inputs"]:
+        if forbidden in inputs:
+            errors.append(f"predictor.inputs must not include {forbidden!r} (plan §9)")
 
     command_source = pred.get("command_source")
     if command_source is None:
-        errors.append("ts_jepa.predictor.command_source must be set (plan §10 records the choice)")
+        errors.append(
+            "ts_jepa.predictor.command_source must be set and labeled an implementation choice "
+            "(plan §9: pretraining ũ is NOT SPECIFIED)"
+        )
 
     if errors:
         raise ValueError("Plan §9 predictor config mismatch:\n  - " + "\n  - ".join(errors))

@@ -30,7 +30,7 @@ def plot_nmae_by_horizon(
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.plot(horizons, values, marker="o", linewidth=2)
     ax.set_xlabel("Prediction horizon h")
-    ax.set_ylabel("NMAE")
+    ax.set_ylabel("Command NMAE (mean |Δu| / 40 N)")
     ax.set_xticks(horizons)
     ax.grid(True, alpha=0.3)
     if title is None:
@@ -87,25 +87,74 @@ def plot_wireless_control_scores(
     """
     Plot mean control score vs SNR for each scheduler policy.
 
-    Expects baseline_report['wireless'] structure:
-      {policy: {snr_str: {mean_control_score, schedule_receive_rate}}}
+    Accepts either:
+      {policy: {snr_str: {mean_control_score, ...}}}
+    or the nested plan §17 report:
+      {channel_model: ..., policies: {policy: {snr_str: {...}}}}
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if not wireless_report:
         raise ValueError("wireless_report is empty")
 
+    policies = wireless_report.get("policies") if isinstance(wireless_report, dict) else None
+    plot_data = policies if isinstance(policies, dict) else wireless_report
+
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    for policy, snr_map in wireless_report.items():
+    for policy, snr_map in plot_data.items():
+        if policy in {"channel_model", "skipped", "reason", "checks"}:
+            continue
+        if not isinstance(snr_map, dict):
+            continue
         items: list[tuple[float, float]] = []
         for snr_key, payload in snr_map.items():
+            if not isinstance(payload, dict) or "mean_control_score" not in payload:
+                continue
             items.append((float(snr_key), float(payload["mean_control_score"])))
+        if not items:
+            continue
         items.sort(key=lambda x: x[0])
         snrs = [s for s, _ in items]
         scores = [v for _, v in items]
         ax.plot(snrs, scores, marker="o", linewidth=2, label=str(policy))
     ax.set_xlabel("SNR target (dB)")
     ax.set_ylabel("Mean control score")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return out_path
+
+
+def plot_fig4_mape(
+    fig4_report: Mapping[str, Any],
+    out_path: Path | str,
+    *,
+    title: str = "Fig. 4 consecutive-frame MAPE vs sampling interval",
+) -> Path:
+    """Plot Eq. (26) MAPE vs sampling interval, with and without augmentation."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    by_rate = dict(fig4_report.get("by_sampling_interval_ms") or {})
+    if not by_rate:
+        raise ValueError("fig4_report has empty by_sampling_interval_ms")
+
+    def _payload(rate: float) -> Mapping[str, Any]:
+        for key in (str(rate), str(int(rate)) if float(rate).is_integer() else str(rate)):
+            if key in by_rate:
+                return by_rate[key]
+        raise KeyError(rate)
+
+    rates = sorted(float(k) for k in by_rate.keys())
+    raw = [float(_payload(rate)["without_augmentation"]["mean_mape_percent"]) for rate in rates]
+    aug = [float(_payload(rate)["with_augmentation"]["mean_mape_percent"]) for rate in rates]
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.plot(rates, raw, marker="o", linewidth=2, label="without augmentation")
+    ax.plot(rates, aug, marker="s", linewidth=2, label="with augmentation")
+    ax.set_xlabel("Sampling interval (ms)")
+    ax.set_ylabel("Consecutive-frame MAPE (%)")
     ax.set_title(title)
     ax.grid(True, alpha=0.3)
     ax.legend()

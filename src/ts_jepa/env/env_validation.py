@@ -111,6 +111,24 @@ def _check_cart_position_tracking(env: InvertedCartPoleEnv) -> dict[str, Any]:
     }
 
 
+def _check_subpixel_force_motion(env: InvertedCartPoleEnv) -> dict[str, Any]:
+    """1 ms step at 12 N must change RGB (coverage AA; integer PIL fails this)."""
+    env.reset(seed=0, init_noise=0.0)
+    env.state = np.array([0.0, 0.0, 0.05, 0.0], dtype=np.float64)
+    frame_k = env.render(env.state)
+    next_state, _ = env.step(12.0)
+    frame_k1 = env.render(next_state)
+    a = frame_k.astype(np.float64)
+    b = frame_k1.astype(np.float64)
+    mape = float(np.mean(np.abs(a - b) / np.maximum(np.abs(a), 1.0)))
+    changed = bool(np.any(frame_k != frame_k1))
+    return {
+        "mape": mape,
+        "frames_differ": changed,
+        "pass": changed and mape > 0.0,
+    }
+
+
 def _check_rgb_rendering(env: InvertedCartPoleEnv) -> dict[str, Any]:
     env.reset(seed=0)
     frame = env.render()
@@ -125,16 +143,31 @@ def _check_rgb_rendering(env: InvertedCartPoleEnv) -> dict[str, Any]:
     }
 
 
-def _check_render_resolution(env: InvertedCartPoleEnv) -> dict[str, Any]:
+def _check_render_resolution(config: dict[str, Any], env: InvertedCartPoleEnv) -> dict[str, Any]:
+    """Native camera size is IC; check the env matches the configured camera."""
     frame = env.render(np.zeros(4, dtype=np.float64))
-    exp_h = PLAN_ENVIRONMENT["render_height"]
-    exp_w = PLAN_ENVIRONMENT["render_width"]
+    exp_h = int(config["simulation"]["render_height"])
+    exp_w = int(config["simulation"]["render_width"])
     exp_c = PLAN_ENVIRONMENT["channels"]
     ok = frame.shape == (exp_h, exp_w, exp_c)
     return {
         "shape": list(frame.shape),
         "expected": [exp_h, exp_w, exp_c],
         "pass": ok,
+    }
+
+
+def _check_encoder_input_64x128(config: dict[str, Any], env: InvertedCartPoleEnv) -> dict[str, Any]:
+    """Paper: native frames are resized to 64×128 before the encoder."""
+    frame = env.render(np.zeros(4, dtype=np.float64))
+    pipe = PreprocessPipeline(config, training=False)
+    out = pipe.process_frame(frame)
+    expected = (PLAN_ENVIRONMENT["channels"], PLAN_ENVIRONMENT["encoder_height"], PLAN_ENVIRONMENT["encoder_width"])
+    return {
+        "native_shape": list(frame.shape),
+        "encoder_input_shape": list(out.shape),
+        "expected": list(expected),
+        "pass": tuple(out.shape) == expected,
     }
 
 
@@ -195,9 +228,12 @@ def _check_custom_backend_not_gym(env: InvertedCartPoleEnv) -> dict[str, Any]:
 
 
 def _check_kappa_context_construction(config: dict[str, Any]) -> dict[str, Any]:
-    """Plan §3.1: κ=2 RGB frames → [6, 64, 128] via channel_concat; eval is deterministic."""
+    """κ packing (supervised/AE) plus Algorithm 1 single-frame JEPA context."""
     kappa = int(config["input"]["kappa"])
-    frames = np.zeros((kappa + 1, 64, 128, 3), dtype=np.uint8)
+    h = int(config["simulation"]["render_height"])
+    w = int(config["simulation"]["render_width"])
+    channels = PLAN_ENVIRONMENT["channels"]
+    frames = np.zeros((kappa + 1, h, w, channels), dtype=np.uint8)
     frames[1:] = np.arange(1, kappa + 1, dtype=np.uint8).reshape(-1, 1, 1, 1)
     train_pipe = PreprocessPipeline(config, training=True)
     eval_pipe = PreprocessPipeline(config, training=False)
@@ -205,21 +241,31 @@ def _check_kappa_context_construction(config: dict[str, Any]) -> dict[str, Any]:
     ctx_train = train_pipe.make_context_tensor(frames, t, kappa=kappa)
     ctx_eval_a = eval_pipe.make_context_tensor(frames, t, kappa=kappa)
     ctx_eval_b = eval_pipe.make_context_tensor(frames, t, kappa=kappa)
+    construction = str(config["input"].get("multi_frame_tensor_construction", "channel_concat"))
+    packed_channels = kappa * channels if construction == "channel_concat" else channels
     exp_shape = (
-        PLAN_ENVIRONMENT["context_channels"],
-        PLAN_ENVIRONMENT["render_height"],
-        PLAN_ENVIRONMENT["render_width"],
+        packed_channels,
+        PLAN_ENVIRONMENT["encoder_height"],
+        PLAN_ENVIRONMENT["encoder_width"],
     )
+    ctx_jepa_a = eval_pipe.make_jepa_frame(frames, t)
+    ctx_jepa_b = eval_pipe.make_jepa_frame(frames, t)
+    jepa_shape = (
+        PLAN_ENVIRONMENT["channels"],
+        PLAN_ENVIRONMENT["encoder_height"],
+        PLAN_ENVIRONMENT["encoder_width"],
+    )
+    jepa_ok = tuple(ctx_jepa_a.shape) == jepa_shape and bool(torch.equal(ctx_jepa_a, ctx_jepa_b))
     eval_deterministic = bool(torch.equal(ctx_eval_a, ctx_eval_b))
     shape_ok = tuple(ctx_eval_a.shape) == exp_shape and tuple(ctx_train.shape) == exp_shape
-    channel_concat = config["input"]["multi_frame_tensor_construction"] == "channel_concat"
     return {
         "kappa": kappa,
         "context_shape": list(ctx_eval_a.shape),
         "expected_shape": list(exp_shape),
-        "channel_concat": channel_concat,
+        "jepa_frame_shape": list(ctx_jepa_a.shape),
+        "construction": construction,
         "eval_deterministic": eval_deterministic,
-        "pass": shape_ok and eval_deterministic and channel_concat,
+        "pass": shape_ok and eval_deterministic and jepa_ok,
     }
 
 
@@ -247,7 +293,9 @@ def validate_plan_environment(
         "pendulum_dynamics": _check_pendulum_dynamics(env),
         "cart_position_tracking": _check_cart_position_tracking(env),
         "rgb_rendering": _check_rgb_rendering(env),
-        "render_resolution_64x128": _check_render_resolution(env),
+        "native_render_resolution": _check_render_resolution(config, env),
+        "encoder_input_64x128": _check_encoder_input_64x128(config, env),
+        "subpixel_force_motion": _check_subpixel_force_motion(env),
         "numerical_stability_1ms": _check_numerical_stability_1ms(env),
         "state_render_consistency": _check_state_render_consistency(env),
         "kappa_context_construction": _check_kappa_context_construction(config),
@@ -256,7 +304,7 @@ def validate_plan_environment(
     return {
         "plan_section": "3.3",
         "environment": PLAN_ENVIRONMENT["name"],
-        "backend": PLAN_ENVIRONMENT["backend"],
+        "backend": "custom",
         "checks": checks,
         "overall_pass": overall_pass,
     }

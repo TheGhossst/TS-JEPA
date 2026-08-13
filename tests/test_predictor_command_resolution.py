@@ -1,4 +1,4 @@
-"""Plan §10 predicted-command training ambiguity tests."""
+"""Plan §9 predicted-command training ambiguity tests."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from ts_jepa.models.predictor_command_resolution import (
 from ts_jepa.models.ts_jepa import TSJEPA
 
 
-def test_plan_section10_config_is_explicit_and_open():
+def test_plan_section9_config_is_explicit_and_open():
     config = load_config()
     assert_plan_predictor_command_resolution(config)
     resolution = load_predictor_command_resolution(config)

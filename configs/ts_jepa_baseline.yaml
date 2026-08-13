@@ -1,5 +1,5 @@
 # Paper-faithful TS-JEPA baseline configuration
-# Source of truth: docs/TS-JEPA_Paper-Faithful_Final.md
+# Source of truth: docs/plan.md
 # Unspecified values are IMPLEMENTATION CHOICE (see docs/IMPLEMENTATION_CHOICES.md)
 
 paper:
@@ -27,13 +27,14 @@ simulation:
   sampling_interval_ms: 1
   dt: 0.001
   trajectory_steps: 100
+  observation_stride_steps: 1  # paper §3: store every τ_o = 1 ms; Fig. 4 does not change this
   control_min_N: -20.0
   control_max_N: 20.0
   process_noise_std: 0.0  # Ns=0 deterministic baseline (IC)
   desired_state: [0.0, 0.0, 0.0, 0.0]  # IC
   init_noise: 0.35  # IC — wide enough that DP policy is exercised (not only π=0 deadzone)
-  render_height: 64
-  render_width: 128
+  render_height: 128  # native camera; paper resizes to 64×128
+  render_width: 256
   position_tol: 0.05
   angle_tol: 0.05
   physics:  # IMPLEMENTATION CHOICE
@@ -44,6 +45,7 @@ simulation:
     track_limit: 2.4
 
 # Plan §4 dataset generation (counts mirrored in ts_jepa/semantic_actor.dataset blocks).
+# IC: disjoint trajectory_index ranges — D_s 0..239, D_a 240..359 — so actor test is not a subset of JEPA train.
 dataset_generation:
   D_s:
     purpose: ts_jepa
@@ -55,6 +57,8 @@ dataset_generation:
     test_trajectories: 20
   steps_per_trajectory: 100
   sampling_interval_ms: 1
+  observation_stride_steps: 1
+  appearance_randomization: per_trajectory  # IC — Fig. 5(c) is evaluation illustration, not a required sampler
   control_teacher: dp_nonlinear  # NOT Uniform(-20, 20) — see plan §4.1
 
 control_teacher:  # method PAPER-SPECIFIED; numeric grids PAPER-SILENT → IC
@@ -64,7 +68,7 @@ control_teacher:  # method PAPER-SPECIFIED; numeric grids PAPER-SILENT → IC
   control_effort_weight: 0.001
   discount: 0.99
   value_iteration_iters: 50  # IC
-  dp_substeps: 50  # IC — N physics steps per DP transition (0.05 s at dt=0.001)
+  dp_substeps: 1  # PAPER-IMPLIED — one Bellman transition = one τ_o = 1 ms (Eq. 2 subject to Eq. 1)
   grid:
     x: [-1.2, 1.2, 13]
     x_dot: [-2.5, 2.5, 11]
@@ -76,10 +80,11 @@ environment:
   name: inverted_cart_pole
   observation: RGB
   backend: custom  # not Gym CartPole-v1
-  render_resolution: [64, 128]
+  render_resolution: [128, 256]  # IC native camera; paper only specifies resize destination 64×128
   channels: 3
   kappa: 2
-  context_tensor_shape: [6, 64, 128]
+  context_tensor_shape: [3, 64, 128]  # Algorithm 1: Ψ(x) on one RGB frame
+  jepa_observation: current_frame
   force_range_N: [-20.0, 20.0]
   sampling_interval_ms: 1
   validation: plan_section_3_3  # run via scripts/pipeline/validate_environment.py before training
@@ -105,23 +110,23 @@ input:
 # Plan §5 preprocessing pipeline (values mirrored in input.* above).
 preprocessing:
   training:
-    order: [augmentation, normalization, formatting]
+    order: [augmentation, normalization, resize]
     augmentation: [color_jitter, color_drop]
-    formatting: [gaussian_blur, resize]
+    resize: [gaussian_resize]  # 64×128 with 5×5 Gaussian, σ ~ U[0.1, 0.2]
   evaluation:
-    order: [resize, normalization]
+    order: [normalization, resize]
     stochastic_augmentations: false
-    gaussian_blur: false
+    resize: gaussian_5x5_kernel_resample  # 5×5 Gaussian resample; σ = range midpoint
   final_resolution: [64, 128]
 
-# Plan §8 temporal configuration (values mirrored in input.kappa / prediction_horizon.Kp / encoder.embedding_dim).
+# Plan §6 temporal configuration (values mirrored in input.kappa / prediction_horizon.Kp / encoder.embedding_dim).
 temporal:
   kappa: 2
   Kp: 15
   embedding_dim: 256
-  context_frames: "[x_k-1, x_k]"
+  context_frames: "[x_k]"  # Algorithm 1; κ=2 channel-concat is supervised/AE only
   control_sequence: "[u_k, ..., u_{k+Kp-1}]"
-  target_frames: "[x_{k+1}, ..., x_{k+Kp}]"  # encoded as κ-windows ending at each target time
+  target_frames: "[x_{k+1}, ..., x_{k+Kp}]"  # Algorithm 1: one RGB frame per target step
   predicted_latents: "[z~_{k+1}, ..., z~_{k+Kp}]"
 
 ts_jepa:
@@ -133,12 +138,13 @@ ts_jepa:
     embedding_dim: 256
     embedding_dim_status: paper_implied_baseline
     fig7_candidate_dimensions: [64, 128, 256, 350]
-    blocks_per_stage: 2  # IC — plan §6.1 / §26.2 VERIFY
-    stem:  # plan §6.1
+    blocks_per_stage: 2  # IC — not paper-specified
+    spatial_pool_hw: [4, 8]  # IC — not GAP; paper is silent on pooling/head
+    stem:  # IC — not paper architecture (plan §7)
       kernel_size: 7
       stride: 2
       pooling: max
-  target_encoder:  # plan §7
+  target_encoder:  # plan §8
     architecture: same_as_context_encoder
     initialization: copy_context_weights
     trainable: false
@@ -149,13 +155,13 @@ ts_jepa:
     type: MLP
     hidden_dim: 1024
     output_dim: 256
-    activation: ReLU
-    input_tensor_construction: concat_embedding_and_command
+    activation: ReLU  # IC — plan §9 specifies 1024/256 MLP, not the hidden nonlinearity
+    input_tensor_construction: concat_embedding_and_command  # IC — concat vs other fusion is NOT SPECIFIED
     autoregressive: true
     inputs: [embedding, control_command]
     forbidden_inputs: [virtual_inputs, virtual_channel_variables, virtual_channel_embeddings]
     command_source: teacher_dp
-  # Plan §10 / §26.1 — predicted-command training ambiguity (OPEN).
+  # Plan §9 — predicted-command training ambiguity (OPEN).
   predictor_command_resolution:
     status: OPEN
     status_description: PENDING_PAPER_IMPLEMENTATION_RESOLUTION
@@ -176,18 +182,18 @@ ts_jepa:
       this is closed-loop inference and is separate from JEPA-training conditioning.
   prediction_horizon:
     Kp: 15
-  optimizer:  # plan §12 — paper-faithful; do not use Adam / LR=0.001 / EMA=0.996
+  optimizer:  # plan §11 Table II — do not use Adam / LR=0.001 / EMA=0.996
     type: SGD
     learning_rate: 0.2
     batch_size: 256  # paper effective batch; gradients accumulated to this size
     microbatch_size: 16  # IC — GPU memory; accumulation = batch_size / microbatch_size
     epochs: 150
     weight_decay: 0.0004
-    momentum: 0.0
-  lr_decay:  # plan §12 — multiply LR by 0.99 every 20 epochs
+    momentum: 0.0  # IC — Table II does not specify SGD momentum
+  lr_decay:  # plan §11 — multiply LR by 0.99 every 20 epochs
     factor: 0.99
     interval_epochs: 20
-  loss:  # plan §11
+  loss:  # plan §10 — cosine only; no VICReg / reconstruction
     paper_objective: cosine_similarity_alignment
     formula: "L_JEPA = -(1/Kp) * sum_{j=1}^{Kp} cos_sim(z_pred_j, z_target_j)"
     cosine_similarity: "(z_pred · z_target) / (||z_pred||_2 * ||z_target||_2)"
@@ -195,7 +201,8 @@ ts_jepa:
     minimizing_form: one_minus_mean_cosine_similarity
     target_source: ema_target_encoder
     target_stop_gradient: true
-  # Plan §13 — per-batch training procedure (enforced by jepa_forward_batch / jepa_sgd_and_ema_step).
+    forbidden_aux_losses: [vicreg, reconstruction]
+  # Plan §10 Algorithm 1 (enforced by jepa_forward_batch / jepa_sgd_and_ema_step).
   training_procedure:
     steps:
       - context_encoding
@@ -208,8 +215,8 @@ ts_jepa:
     frozen_modules: [target_encoder]
     target_stop_gradient: true
     ema_after_optimizer_step: true
-  early_stopping:
-    enabled: false
+  early_stopping:  # plan §11 — paper Section IV.A; patience / val count are IC
+    enabled: true
     patience: 20  # IC
     validation_trajectory_count: 20  # IC — carved from train only; not paper-specified
   dataset:
@@ -222,7 +229,7 @@ semantic_actor:
     hidden_dims: [1024, 256]
     activation: ReLU
     dropout: 0.2
-    output_activation: linear_then_clip_after_denorm  # IC
+    output_activation: linear  # IC (plan §18); tanh/clip NOT SPECIFIED by the paper
   optimizer:
     type: AdamW
     learning_rate: 0.006
@@ -230,6 +237,7 @@ semantic_actor:
     epochs: 300
     weight_decay: 0.01
   loss: MSE
+  loss_domain: physical  # Eq. 15 ||u - ũ|| on Newtons; z-score is TS-JEPA-only
   early_stopping:
     enabled: true
     patience: 30  # IC
@@ -253,12 +261,12 @@ wireless:  # networking layer — not part of neural TS-JEPA
   noise_power_db: -95.0
   shadow_fading_std_db: 4.0  # paper-specified for PL_dB model
   snr_targets_db: [5, 10, 20]
-  # Remaining scalars are IMPLEMENTATION CHOICE (not numerically stated in Final.md)
-  max_devices_scheduled_J: 2
-  p_max_watt: 0.2
-  drift_plus_penalty_V: 1.0
-  aoi_threshold_beta_th: 5.0
-  num_devices: 4
+  # Remaining scalars are IMPLEMENTATION CHOICE (plan §18: not in Table IV or body text)
+  max_devices_scheduled_J: 2  # IC J
+  p_max_watt: 0.2  # IC p_max
+  drift_plus_penalty_V: 1.0  # IC V
+  aoi_threshold_beta_th: 5.0  # IC β_th
+  num_devices: 4  # IC I
 
 evaluation:
   repetitions: 5
@@ -266,7 +274,37 @@ evaluation:
   reported_result: best
   control_position_tol: 0.05
   control_angle_tol: 0.05
-  # Plan §16: baseline validation required before wireless evaluation.
+  # Plan §15: baseline validation required before wireless evaluation.
   baseline_validation:
     enabled: true
   tsne_max_samples: 500
+
+# Plan §17. Numeric Fig. 4/7/8/10/11 grids are IMPLEMENTATION CHOICE (plan §18).
+# SNR {5,10,20} is paper-specified (use wireless.snr_targets_db).
+experiments:
+  allow_non_baseline_embedding_dim: false
+  fig4_sampling_interval_ms: [1, 2, 5, 10]  # IC — Fig. 4 rates NOT SPECIFIED; subsample stored τ_o=1 ms frames
+  fig7_embedding_dims: [64, 128, 256, 350]  # IC — plan §17 names Fig. 7, not the axis values
+  fig8_train_trajectories: [50, 100, 150, 200]  # IC
+  fig9_snr_db: [5, 10, 20]  # must match wireless.snr_targets_db (plan §17)
+  fig10_device_counts: [2, 4, 8, 16, 32]  # IC — I not in Table IV
+  fig11_packet_loss: [0.0, 0.1, 0.2, 0.3]  # IC
+  supervised_architecture:
+    embedding_dim: 256
+    hidden_dims: [1024, 256]
+    dropout: 0.2
+  supervised_training:
+    optimizer: AdamW
+    learning_rate: 0.001
+    batch_size: 64
+    epochs: 50
+  autoencoder_architecture:
+    embedding_dim: 256
+  autoencoder_training:
+    optimizer: AdamW
+    learning_rate: 0.001
+    batch_size: 32
+    epochs: 50
+    rgb_recon_weight: 1.0
+    state_recon_weight: 1.0
+

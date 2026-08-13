@@ -150,14 +150,28 @@ def _resumable_checkpoint_payload(
     return payload
 
 
-def _seed_training_complete(run_dir: Path) -> bool:
-    """True when a seed finished training and wrote a final checkpoint."""
+def seed_training_complete(run_dir: Path, expected_epochs: int) -> bool:
+    """
+    True when a seed finished the requested epoch budget and wrote a final checkpoint.
+
+    ``test_loss`` alone is not enough: a 2-epoch smoke run also writes test_loss
+    and must not skip a later 150-epoch protocol.
+    """
     metrics_path = run_dir / "metrics.json"
     last_path = run_dir / "last.pt"
     if not metrics_path.is_file() or not last_path.is_file():
         return False
     checkpoint = load_checkpoint(last_path)
-    return "test_loss" in checkpoint
+    if "test_loss" not in checkpoint:
+        return False
+    epoch = int(checkpoint.get("epoch") or 0)
+    history = checkpoint.get("history") or []
+    history_epochs = len(history)
+    reached = max(epoch, history_epochs)
+    return reached >= int(expected_epochs)
+
+
+_seed_training_complete = seed_training_complete
 
 
 def _load_completed_seed_result(run_dir: Path) -> dict[str, Any]:
@@ -242,7 +256,7 @@ def evaluate_cosine_loss(
     n_batches = 0
     try:
         for batch in CUDAPrefetcher(loader, device):
-            # Plan §13 steps 1–4 (eval; no SGD/EMA).
+            # Plan §10 Algorithm 1 steps 1–4 (eval; no SGD/EMA).
             result = jepa_forward_batch(model, batch, resolution)
             total += float(result.loss.item())
             n_batches += 1
@@ -267,7 +281,7 @@ def train_ts_jepa(
 
     Model selection uses validation carved from the train split only.
     The untouched JEPA test set is evaluated after training and never used for selection.
-    Predictor conditioning uses the plan §10 documented candidate (see command_resolution).
+    Predictor conditioning uses the plan §9 documented candidate (see command_resolution).
 
     When ``resume_from`` points to a resumable ``last.pt``, training continues from the
     next epoch in the existing run directory without resetting optimizer or best metrics.
@@ -347,7 +361,11 @@ def _train_ts_jepa_body(
     normalizer = fit_command_normalizer(config, data_root=root)
     train_dir = root / "trajectories" / "jepa" / "train"
     test_dir = root / "trajectories" / "jepa" / "test"
-    train_dataset = TrajectoryDataset(train_dir, config, normalizer, training=True)
+    train_files = sorted(train_dir.glob("*.npz"))
+    max_train = config.get("experiments", {}).get("max_jepa_train_trajectories")
+    if max_train is not None:
+        train_files = train_files[: int(max_train)]
+    train_dataset = TrajectoryDataset(train_dir, config, normalizer, training=True, files=train_files)
     test_dataset = TrajectoryDataset(test_dir, config, normalizer, training=False)
     val_count = int(config["ts_jepa"]["early_stopping"]["validation_trajectory_count"])
     train_set, val_set = _split_train_val(train_dataset, val_count)
@@ -482,7 +500,7 @@ def _train_ts_jepa_body(
                 micros_seen += 1
                 watchdog.touch(micro=micros_seen, stage="forward")
                 try:
-                    # Plan §13 steps 1–4 (context → target stop-grad → predict → loss).
+                    # Plan §10 Algorithm 1 steps 1–4 (context → target stop-grad → predict → loss).
                     result = jepa_forward_batch(model, batch, resolution)
                     loss = result.loss
                     # Scale so accumulated grads match mean loss over the effective batch.
@@ -505,7 +523,7 @@ def _train_ts_jepa_body(
 
                 try:
                     watchdog.touch(micro=micros_seen, stage="optimizer")
-                    # Plan §13 steps 5–6: SGD(θ,ϕ) then EMA(θ̄).
+                    # Plan §10 Algorithm 1 steps 5–6: SGD(θ,ϕ) then EMA(θ̄).
                     jepa_sgd_and_ema_step(model, optimizer)
                     assert group_loss_sum is not None
                     step_loss = float(group_loss_sum.item()) / accum_steps
@@ -661,17 +679,19 @@ def train_ts_jepa_repetitions(
     """
     Paper protocol: repeat the experiment, save each seed, report the best validation run.
 
-    Seeds that already finished training (final ``last.pt`` with ``test_loss``) are skipped.
+    Seeds that already finished the requested epoch budget (final ``last.pt``
+    with ``test_loss`` and history/epoch covering ``expected_epochs``) are skipped.
     """
     reps = int(config["evaluation"]["repetitions"])
     seeds = list(config["evaluation"].get("seeds", list(range(reps))))[:reps]
     root_runs = project_root(config) / config["paths"]["runs_root"] / jepa_run_dirname(config)
     root_runs.mkdir(parents=True, exist_ok=True)
+    expected_epochs = int(max_epochs if max_epochs is not None else config["ts_jepa"]["optimizer"]["epochs"])
 
     seed_results = []
     for seed in seeds:
         seed_dir = root_runs / f"seed_{seed}"
-        if _seed_training_complete(seed_dir):
+        if seed_training_complete(seed_dir, expected_epochs):
             seed_results.append(_load_completed_seed_result(seed_dir))
             continue
         result = train_ts_jepa(

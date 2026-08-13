@@ -75,7 +75,7 @@ def _build_contexts_for_trajectory(
     proc_dict = {t: processed[t] for t in range(len(processed))}
     contexts = []
     for time_index in range(frames.shape[0]):
-        contexts.append(pipeline.assemble_context(proc_dict, time_index, kappa=pipeline.kappa))
+        contexts.append(pipeline.assemble_jepa_frame(proc_dict, time_index))
     return contexts
 
 
@@ -295,9 +295,7 @@ def _trace_dataset_samples(
         context = item["context"]
         with torch.no_grad():
             emb = jepa.encode_context(context.unsqueeze(0).to(device)).cpu().numpy()[0]
-        kappa = dataset.kappa
-        start = max(0, time_index - kappa + 1)
-        frame_indices = list(range(start, time_index + 1))
+        frame_indices = [int(time_index)]
         traces.append(
             {
                 "dataset_index": idx,

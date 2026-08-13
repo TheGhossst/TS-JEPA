@@ -22,17 +22,21 @@ def test_plan_encoder_config_matches_baseline_yaml():
 
 
 def test_context_encoder_stem_and_stages():
-    enc = ContextEncoder(in_channels=6, widths=[64, 128, 256], embedding_dim=256)
+    """Stem / 4×8 pool / 3-ch RGB input (Algorithm 1). 6-ch concat is supervised/AE only."""
+    enc = ContextEncoder(in_channels=3, widths=[64, 128, 256], embedding_dim=256)
     stem_conv = enc.stem[0]
     assert isinstance(stem_conv, torch.nn.Conv2d)
     assert stem_conv.kernel_size == (7, 7)
     assert stem_conv.stride == (2, 2)
-    assert stem_conv.in_channels == 6
+    assert stem_conv.in_channels == 3
     assert stem_conv.out_channels == 64
     assert isinstance(enc.stem[3], torch.nn.MaxPool2d)
     summary = enc.architecture_summary()
     assert summary["widths"] == [64, 128, 256]
     assert summary["embedding_dim"] == 256
+    assert summary["spatial_pool_hw"] == [4, 8]
+    assert summary["head"] == "SpatialPool-Flatten-Linear"
+    assert enc.global_pool.output_size == (4, 8)
 
 
 def test_context_encoder_rejects_non_plan_widths():
@@ -49,8 +53,8 @@ def test_model_forward_shapes_and_loss():
     model = TSJEPA(config)
     actor = SemanticActor(embedding_dim=256)
     b, kp = 2, config["ts_jepa"]["prediction_horizon"]["Kp"]
-    context = torch.randn(b, 6, 64, 128)
-    future = torch.randn(b, kp, 6, 64, 128)
+    context = torch.randn(b, 3, 64, 128)
+    future = torch.randn(b, kp, 3, 64, 128)
     commands = torch.randn(b, kp)
     z = model.encode_context(context)
     z_tgt = model.encode_targets(future)
@@ -67,7 +71,7 @@ def test_model_forward_shapes_and_loss():
 
 def test_target_encoder_same_class_and_init():
     config = load_config()
-    context = ContextEncoder(in_channels=6, widths=[64, 128, 256], embedding_dim=256)
+    context = ContextEncoder(in_channels=3, widths=[64, 128, 256], embedding_dim=256)
     target = initialize_target_from_context(context)
     assert isinstance(target, TargetEncoder)
     assert_target_initialized_from_context(context, target)
@@ -81,8 +85,8 @@ def test_target_encoder_no_grad_on_backward():
     model.context_encoder.train()
     model.target_encoder.eval()
     b, kp = 2, int(config["ts_jepa"]["prediction_horizon"]["Kp"])
-    context = torch.randn(b, 6, 64, 128)
-    future = torch.randn(b, kp, 6, 64, 128)
+    context = torch.randn(b, 3, 64, 128)
+    future = torch.randn(b, kp, 3, 64, 128)
     commands = torch.randn(b, kp)
     z = model.encode_context(context)
     z_tgt = model.encode_targets(future)
@@ -111,8 +115,30 @@ def test_ema_update_moves_target_toward_context():
         assert torch.allclose(t_param.detach(), expected, atol=1e-6)
 
 
-def test_plan_config_rejects_wrong_embedding_dim():
+def test_spatial_pool_is_not_a_plan_requirement():
+    """Plan §7 / §18: pooling / 4×8 head is NOT SPECIFIED."""
     config = copy.deepcopy(load_config())
-    config["ts_jepa"]["encoder"]["embedding_dim"] = 128
-    with pytest.raises(ValueError, match="Plan §6"):
+    config["ts_jepa"]["encoder"]["spatial_pool_hw"] = [1, 1]
+    assert_plan_encoder_config(config)
+
+
+def test_resnet_stem_and_block_count_are_not_plan_requirements():
+    """Plan §7 / §18: stem and blocks_per_stage are NOT SPECIFIED."""
+    config = copy.deepcopy(load_config())
+    config["ts_jepa"]["encoder"]["blocks_per_stage"] = 8
+    config["ts_jepa"]["encoder"]["stem"] = {"kernel_size": 3, "stride": 1, "pooling": "none"}
+    assert_plan_encoder_config(config)
+
+
+def test_plan_config_rejects_wrong_widths():
+    config = copy.deepcopy(load_config())
+    config["ts_jepa"]["encoder"]["widths"] = [32, 64, 128]
+    with pytest.raises(ValueError, match="widths"):
+        assert_plan_encoder_config(config)
+
+
+def test_plan_config_rejects_wrong_ema():
+    config = copy.deepcopy(load_config())
+    config["ts_jepa"]["target_encoder"]["ema_decay"] = 0.996
+    with pytest.raises(ValueError, match="ema_decay"):
         assert_plan_encoder_config(config)

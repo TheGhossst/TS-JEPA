@@ -1,4 +1,4 @@
-"""Plan §13 TS-JEPA training procedure tests."""
+"""Plan §10 Algorithm 1 TS-JEPA training procedure tests."""
 
 from __future__ import annotations
 
@@ -20,11 +20,9 @@ from ts_jepa.training.jepa_procedure import (
 
 def _tiny_batch(config: dict, batch_size: int = 2) -> dict[str, torch.Tensor]:
     kp = int(config["ts_jepa"]["prediction_horizon"]["Kp"])
-    kappa = int(config["input"]["kappa"])
-    c = 3 * kappa
     return {
-        "context": torch.randn(batch_size, c, 64, 128),
-        "future_frames": torch.randn(batch_size, kp, c, 64, 128),
+        "context": torch.randn(batch_size, 3, 64, 128),
+        "future_frames": torch.randn(batch_size, kp, 3, 64, 128),
         "teacher_commands_norm": torch.randn(batch_size, kp),
     }
 
@@ -108,7 +106,7 @@ def test_optimizer_excludes_target_encoder():
 def test_plan_jepa_procedure_rejects_wrong_step_order():
     config = copy.deepcopy(load_config())
     config["ts_jepa"]["training_procedure"]["steps"] = list(reversed(PLAN_JEPA_PROCEDURE["steps"]))
-    with pytest.raises(ValueError, match="Plan §13"):
+    with pytest.raises(ValueError, match="Plan §10"):
         assert_plan_jepa_procedure_config(config)
 
 

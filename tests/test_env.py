@@ -19,11 +19,15 @@ def test_plan_environment_config_matches_baseline_yaml():
     config = load_config()
     assert_plan_environment_config(config)
     sim = config["simulation"]
-    assert sim["render_height"] == PLAN_ENVIRONMENT["render_height"]
-    assert sim["render_width"] == PLAN_ENVIRONMENT["render_width"]
     assert sim["control_min_N"] == PLAN_ENVIRONMENT["force_min_N"]
     assert sim["control_max_N"] == PLAN_ENVIRONMENT["force_max_N"]
+    assert sim["trajectory_steps"] == PLAN_ENVIRONMENT["trajectory_steps"]
+    assert sim["observation_stride_steps"] == PLAN_ENVIRONMENT["observation_stride_steps"]
     assert config["input"]["kappa"] == PLAN_ENVIRONMENT["kappa"]
+    assert config["input"]["resize"] == [
+        PLAN_ENVIRONMENT["encoder_height"],
+        PLAN_ENVIRONMENT["encoder_width"],
+    ]
 
 
 def test_build_env_from_config_matches_plan():
@@ -31,8 +35,12 @@ def test_build_env_from_config_matches_plan():
     env = build_inverted_cartpole_env(config)
     assert isinstance(env, InvertedCartPoleEnv)
     assert env.ode.dt == PLAN_ENVIRONMENT["dt"]
-    assert env.renderer.height == 64
-    assert env.renderer.width == 128
+    assert env.force_min == PLAN_ENVIRONMENT["force_min_N"]
+    assert env.force_max == PLAN_ENVIRONMENT["force_max_N"]
+    assert env.observation_stride_steps == PLAN_ENVIRONMENT["observation_stride_steps"]
+    # Native camera size is IC, taken from config rather than the paper.
+    assert env.renderer.height == int(config["simulation"]["render_height"])
+    assert env.renderer.width == int(config["simulation"]["render_width"])
 
 
 def test_ode_step_deterministic_and_shape():
@@ -45,14 +53,14 @@ def test_ode_step_deterministic_and_shape():
 
 
 def test_env_rollout_rgb_shapes():
-    env = InvertedCartPoleEnv(render_height=64, render_width=128, dt=0.001, process_noise_std=0.0)
+    env = InvertedCartPoleEnv(render_height=128, render_width=256, dt=0.001, process_noise_std=0.0)
 
     class ZeroPolicy:
         def act(self, state):
             return 0.0
 
     traj = env.rollout(ZeroPolicy(), steps=5, seed=0)
-    assert traj["frames"].shape == (5, 64, 128, 3)
+    assert traj["frames"].shape == (5, 128, 256, 3)
     assert traj["commands"].shape == (5,)
     assert traj["states"].shape == (5, 4)
     assert traj["frames"].dtype == np.uint8
@@ -63,15 +71,25 @@ def test_plan_environment_validation_passes_baseline_config():
     report = validate_plan_environment(config)
     assert report["overall_pass"] is True
     assert report["checks"]["force_limits"]["pass"]
-    assert report["checks"]["render_resolution_64x128"]["pass"]
+    assert report["checks"]["native_render_resolution"]["pass"]
+    assert report["checks"]["encoder_input_64x128"]["pass"]
+    assert report["checks"]["subpixel_force_motion"]["pass"]
     assert report["checks"]["kappa_context_construction"]["pass"]
     assert_plan_environment_validated(config)
 
 
-def test_plan_environment_config_rejects_wrong_render_size():
+def test_native_render_size_is_not_a_plan_requirement():
+    """Plan §3: native camera resolution is NOT SPECIFIED."""
     config = copy.deepcopy(load_config())
     config["simulation"]["render_height"] = 96
-    with pytest.raises(ValueError, match="Plan §3"):
+    config["simulation"]["render_width"] = 192
+    assert_plan_environment_config(config)
+
+
+def test_plan_environment_config_rejects_wrong_stride():
+    config = copy.deepcopy(load_config())
+    config["simulation"]["observation_stride_steps"] = 50
+    with pytest.raises(ValueError, match="observation_stride_steps"):
         assert_plan_environment_config(config)
 
 

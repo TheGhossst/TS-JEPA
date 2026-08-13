@@ -8,14 +8,10 @@ class Predictor(nn.Module):
     """
     Action-conditioned MLP predictor Pφ (plan §9).
 
-    Architecture (§9.1):
-      concat(z, u) → Linear → 1024 → ReLU → Linear → 256
+    Paper-specified: hidden 1024, output 256, autoregressive, command-conditioned.
 
-    Applied autoregressively (§9.1):
-      z_{j+1} = Pφ(concat(z_j, u_j))
-
-    Inputs (§9.2): current embedding + control command only.
-    Forbidden: virtual-channel / virtual-input terms.
+    Hidden ReLU, concat fusion, and input width 257 are IMPLEMENTATION CHOICES (plan §9 / §18).
+    Virtual-channel inputs are forbidden.
     """
 
     def __init__(
@@ -24,15 +20,20 @@ class Predictor(nn.Module):
         command_dim: int = 1,
         hidden_dim: int = 1024,
         output_dim: int | None = None,
+        *,
+        strict_baseline_dim: bool = True,
     ) -> None:
         super().__init__()
         if int(hidden_dim) != 1024:
-            raise ValueError(f"plan §9.1 predictor hidden_dim must be 1024, got {hidden_dim}")
+            raise ValueError(f"plan §9 predictor hidden_dim must be 1024, got {hidden_dim}")
         out_dim = int(output_dim if output_dim is not None else embedding_dim)
-        if out_dim != 256:
-            raise ValueError(f"plan §9.1 predictor output_dim must be 256, got {out_dim}")
-        if int(embedding_dim) != 256:
-            raise ValueError(f"plan §9 predictor embedding_dim must be 256, got {embedding_dim}")
+        if strict_baseline_dim:
+            if out_dim != 256:
+                raise ValueError(f"plan §9 predictor output_dim must be 256, got {out_dim}")
+            if int(embedding_dim) != 256:
+                raise ValueError(f"plan §9 predictor embedding_dim must be 256, got {embedding_dim}")
+        elif out_dim != int(embedding_dim):
+            raise ValueError(f"predictor output_dim ({out_dim}) must match embedding_dim ({embedding_dim})")
         if int(command_dim) != 1:
             raise ValueError(f"plan §9 cart-pole control is scalar; command_dim must be 1, got {command_dim}")
 
@@ -42,7 +43,7 @@ class Predictor(nn.Module):
         self.output_dim = out_dim
         self.input_dim = self.embedding_dim + self.command_dim
 
-        # Plan §9.1 layer stack
+        # IC fusion: concat(z, u) → Linear(257, 1024); concat width is not paper-specified.
         self.fc_in = nn.Linear(self.input_dim, self.hidden_dim)
         self.relu = nn.ReLU(inplace=True)
         self.fc_out = nn.Linear(self.hidden_dim, self.output_dim)
@@ -54,7 +55,7 @@ class Predictor(nn.Module):
 
     def forward_step(self, embedding: torch.Tensor, command_norm: torch.Tensor) -> torch.Tensor:
         """
-        One autoregressive predictor step (plan §9.2).
+        One autoregressive predictor step (plan §9).
 
         Inputs: z_current [B, D] and u_j [B, 1] (normalized scalar control).
         """
@@ -74,7 +75,7 @@ class Predictor(nn.Module):
         horizon: int | None = None,
     ) -> torch.Tensor:
         """
-        Autoregressive prediction over Kp steps (plan §9.1).
+        Autoregressive prediction over Kp steps (plan §9).
 
         commands_norm: [B, Kp] or [B, Kp, 1]
         returns: [B, Kp, D] with z̃_{k+1}, ..., z̃_{k+Kp}

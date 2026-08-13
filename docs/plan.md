@@ -1,1530 +1,758 @@
-# Paper-Faithful Implementation Plan: Time-Series JEPA (TS-JEPA)
+# Paper-Faithful Plan: Time-Series JEPA (TS-JEPA)
 
-## 0. Purpose
+**Source (only):** Abanoub M. Girgis, Alvaro Valcarce, and Mehdi Bennis,
+*Time-Series JEPA for Predictive Remote Control Under Capacity-Limited
+Networks,* IEEE Internet of Things Journal, Vol. 13, No. 7, 1 April
+2026. DOI: 10.1109/JIOT.2025.3650435.
 
-This document is the updated implementation specification for
-reproducing:
+This document is the implementation plan for reproducing **that paper**.
+It must not deviate from the published text, equations, algorithms, and
+tables.
 
-**Time-Series JEPA for Predictive Remote Control Under Capacity-Limited
-Networks**
+### Evidence labels
 
-The goal is to reproduce the TS-JEPA baseline as faithfully as possible
-**before** adding the GE-JEPA extension.
+-   **PAPER-SPECIFIED** — stated in the paper.
+-   **PAPER-IMPLIED** — follows from equations/architecture, not written
+    as a standalone sentence.
+-   **NOT SPECIFIED** — the paper is silent. Do not invent a value and
+    call it paper-exact.
 
-This version incorporates the corrections made during the
-architecture/code cross-check:
+A reproduction may still need executable choices where the paper is
+silent. Those choices belong in `docs/IMPLEMENTATION_CHOICES.md`, not
+here as paper requirements.
 
--   Custom inverted cart-pole with RGB observations.
--   DP/nonlinear teacher-generated actions rather than independent
-    random actions.
--   Exact TS-JEPA architecture constraints.
--   Exact TS-JEPA training hyperparameters recovered from the paper.
--   Exact semantic actor architecture/training settings recovered from
-    the current implementation notes.
--   Predictor receives the current/predicted latent state and predicted
-    control commands, without invented virtual-channel inputs.
--   Target encoder uses stop-gradient + EMA.
--   The predicted-command generation mechanism during TS-JEPA training
-    remains an explicit unresolved implementation ambiguity.
--   Wireless scheduling is implemented only after the TS-JEPA + actor
-    baseline is validated.
--   GE-JEPA is added only after the TS-JEPA baseline is experimentally
-    validated.
+This paper does **not** contain Gilbert–Elliott burst channels, burst
+masking, Burst Position Encoding, or a burst-aware JEPA objective. Do
+not add them to this plan.
 
 ------------------------------------------------------------------------
 
-# 1. Overall System
+# 1. What the paper proposes
 
-The original TS-JEPA system contains three main learned/system
-components:
+A semantic-driven predictive control system plus channel-aware
+scheduling for multiple inverted cart-pole devices under limited uplink
+capacity.
 
-  -----------------------------------------------------------------------
-  Component               Location                Function
-  ----------------------- ----------------------- -----------------------
-  Context Encoder `Ψθ`    Device                  Maps high-dimensional
-                                                  RGB state/frame to a
-                                                  256-D latent embedding
+Learned components (**PAPER-SPECIFIED**):
 
-  Target Encoder `Ψθ̄`     Training only           Produces stable
-                                                  future-state target
-                                                  embeddings
+1.  Context encoder \(\Psi_\theta\) on the device: maps the
+    high-dimensional state (RGB frame) to a low-dimensional embedding
+    \(z_{i,k} = \Psi_\theta(x_{i,k})\).
+2.  Target encoder \(\Psi_{\bar\theta}\) (training only): encodes future
+    states; same architecture as the context encoder; stop-gradient;
+    EMA update.
+3.  Predictor \(P_\phi\) at the remote controller: predicts future
+    embeddings from the current embedding and predicted control
+    commands.
+4.  Semantic actor \(C_\varepsilon\) at the remote controller: maps
+    embeddings (received or predicted) to control commands.
 
-  Predictor `Pϕ`          Remote controller       Autoregressively
-                                                  predicts future latent
-                                                  embeddings
+Networking component (**PAPER-SPECIFIED**, not a neural block):
 
-  Semantic Actor `Cε`     Remote controller       Maps latent embeddings
-                                                  to control commands
+5.  Channel-aware scheduler: selects up to \(J\) devices using AoI,
+    virtual queues, and required transmit power under InF-SH wireless
+    conditions.
 
-  Channel-Aware Scheduler Controller/base station Determines which
-                                                  devices transmit based
-                                                  on wireless/channel
-                                                  state and AoI
-  -----------------------------------------------------------------------
-
-The central TS-JEPA idea is to predict future **semantic embeddings**
-instead of reconstructing future RGB frames.
-
-The context encoder produces:
-
-``` text
-z_i,k = Ψθ(x_i,k)
-```
-
-The target encoder produces:
-
-``` text
-z̄_i,k+j = Ψθ̄(x_i,k+j)
-```
-
-The predictor produces:
-
-``` text
-z̃_i,k+1, ..., z̃_i,k+Kp
-```
-
-conditioned on the current embedding and predicted control commands.
-
-The JEPA objective aligns predicted embeddings with target embeddings
-using cosine similarity.
+The paper’s reported headline results (abstract): 98.95% communication
+cost reduction, normalized prediction error 0.004, 74.48% control
+accuracy, robust 15-step prediction, and up to 16× more devices than
+round-robin / opportunistic baselines with conventional control.
 
 ------------------------------------------------------------------------
 
-# 2. Experimental Principle
+# 2. Control system model
 
-The implementation must follow this order:
+**PAPER-SPECIFIED** (Section II.A).
+
+Devices \(i \in \mathcal{I}\). The sensor samples a \(p\)-dimensional
+state at fixed sampling time \(\tau_o\):
 
 ``` text
-Exact CartPole environment
-        ↓
-Exact teacher / dataset generation
-        ↓
-Exact TS-JEPA architecture
-        ↓
-Resolve predicted-command ambiguity
-        ↓
-Train TS-JEPA
-        ↓
-Train semantic actor
-        ↓
-Validate TS-JEPA baseline
-        ↓
-Implement wireless channel
-        ↓
-Implement paper scheduler
-        ↓
-Evaluate packet-loss / sparse-transmission behavior
-        ↓
-Gilbert-Elliott burst channel
-        ↓
-Burst masking
-        ↓
-Burst Position Encoding
-        ↓
-Burst-aware JEPA objective
-        ↓
-GE-JEPA evaluation
+x_{i,k} ∈ R^p     at t = k τ_o
 ```
 
-Do **not** add GE-JEPA components before the baseline is validated.
+The remote controller computes a \(q\)-dimensional command
+\(u_{i,k} \in \mathbb{R}^q\), sent to the actuator over ideal downlink.
 
-The purpose is to ensure that any later improvement or degradation can
-be attributed to the GE-JEPA extension rather than to an incorrect
-TS-JEPA reproduction.
+Dynamics (Eq. 1):
+
+``` text
+x_{i,k+1} = f_i(x_{i,k}, u_{i,k}) + n_{s,k}
+```
+
+\(n_{s,k}\) is i.i.d. Gaussian, zero mean, variance \(N_s\).
+
+**NOT SPECIFIED:** a numerical cart-pole value of \(N_s\).
+
+Target command (Eq. 2–3), solved by **dynamic programming**:
+
+``` text
+u*_{i,k} = arg min_{u_{i,k}} J(x_{i,k}, u_{i,k})
+
+subject to Eq. (1) and u_min ≤ u_{i,k} ≤ u_max
+
+J = (1/2) Σ_{k=0}^{K} ( ||x_{i,k} - x_d||_F^2 + u_{i,k}^T R u_{i,k} )
+```
+
+\(R\) is positive definite.
+
+**NOT SPECIFIED:** numerical \(R\), cart/pole masses, pole length,
+gravity, integrator, Gym vs custom backend, state-grid sizes.
+
+Do **not** replace DP with LQR, or independent `Uniform(u_min, u_max)`
+actions, and call that the paper policy.
+
+**PAPER-IMPLIED:** the DP transition in Eq. (2) is the same discrete map
+as Eq. (1), so one Bellman stage equals one \(\tau_o\) (1 ms in
+Section IV). Do not hold \(u\) for a longer inner horizon and call that
+the paper teacher.
 
 ------------------------------------------------------------------------
 
-# 3. Environment: Custom Inverted Cart-Pole
+# 3. Simulation environment (inverted cart-pole)
 
-## 3.1 Observation
-
-The model operates on RGB observations rather than directly consuming
-the four-dimensional physical state.
-
-Target rendering resolution:
+**PAPER-SPECIFIED** (Section IV opening + control limits). The paper
+uses “high-dimensional state” and “frame” interchangeably in
+**Section II.C** (Problem Statement), not in the Section IV opening.
 
 ``` text
-Height = 64
-Width  = 128
-Channels = 3
-```
-
-For `κ = 2`, two consecutive RGB frames may be concatenated as the
-context input:
-
-``` text
-[B, 6, 64, 128]
-```
-
-The exact context construction must remain consistent throughout
-training and evaluation.
-
-## 3.2 Control
-
-The cart is controlled by a horizontal force:
-
-``` text
-u_i,k ∈ R^1
-```
-
-with:
-
-``` text
-u_min = -20 N
+environment: inverted cart-pole
+state: RGB frame
+τ_o = 1 ms
+trajectory length: 100 time steps
 u_max = +20 N
+u_min = −20 N
+command: horizontal force on the cart
+control policy: nonlinear policy solved by dynamic programming
 ```
 
-Sampling period:
+The paper states that this 1 ms rate is selected to capture meaningful
+temporal dynamics for predictive embedding learning, with further
+analysis in Fig. 4.
 
-``` text
-τ_o = 1 ms
-```
+Fig. 4 compares consecutive-frame MAPE **at different sampling rates**,
+with and without augmentation. That figure is an analysis of temporal
+diversity. It does **not** change the stated simulation sampling
+interval. The main setup remains \(\tau_o = 1\) ms and 100 steps.
 
-The environment should implement the paper's custom inverted-cart-pole
-dynamics rather than replacing it with Gym `CartPole-v1`.
+**NOT SPECIFIED:** native camera resolution before resize. Do not claim
+64×128, 128×256, or any other native size as a paper camera
+specification. The paper only specifies the **resize destination**
+64×128 (Section IV.A).
 
-The physical dynamics are represented abstractly as:
-
-``` text
-x_i,k+1 = f_i(x_i,k, u_i,k) + n_s,k
-```
-
-where `n_s,k` represents the process-noise term when enabled by the
-reproduction.
-
-## 3.3 Environment validation
-
-Before training, verify:
-
--   Force limits.
--   State integration.
--   Pendulum dynamics.
--   Desired cart-position tracking.
--   RGB rendering.
--   Rendering resolution `64 × 128`.
--   Numerical stability at `1 ms`.
--   Consistency between physical state and rendered image.
+Fig. 5(c) shows two frames with different cart colors and the same
+physical state, to argue semantic invariance. That is an evaluation
+illustration. The paper’s specified mechanism for spatial diversity is
+the augmentation list in Section IV.A, not a mandatory per-trajectory
+color sampler.
 
 ------------------------------------------------------------------------
 
-# 4. Dataset Generation
+# 4. Datasets
 
-Two datasets are required.
-
-  Dataset   Purpose                    Training              Test   Steps / trajectory
-  --------- ---------------- ------------------ ----------------- --------------------
-  `D_s`     TS-JEPA            200 trajectories   40 trajectories                  100
-  `D_a`     Semantic actor     100 trajectories   20 trajectories                  100
-
-Sampling period:
+**PAPER-SPECIFIED** (Section IV.A):
 
 ``` text
-τ_o = 1 ms
+D_s  (TS-JEPA):     200 train + 40 test trajectories
+                    RGB frames paired with control commands
+                    D_s = {x_{i,k}, u_{i,k}}_{k=1}^{K_s}
+
+D_a  (semantic actor): 100 train + 20 test trajectories
+                    embeddings paired with control commands
+                    D_a = {z_{i,k}, u_{i,k}}_{k=1}^{K_a}
 ```
 
-## 4.1 Teacher-generated control
+Each simulated trajectory is 100 time steps at \(\tau_o = 1\) ms.
 
-The dataset should be generated using the nonlinear /
-dynamic-programming teacher policy used for the reproduction.
+The actor dataset is formed **after** TS-JEPA is trained, using the
+context encoder to produce \(z_{i,k}\).
 
-The teacher produces:
-
-``` text
-u_k*
-```
-
-The implementation must explicitly verify that it is **not** generating
-actions independently as:
-
-``` text
-Uniform(-20, 20)
-```
-
-This is an important correction to the earlier implementation plan.
-
-The teacher-generated trajectory should provide the state/frame and
-corresponding control command sequence.
-
-Conceptually:
-
-``` text
-state/frame_k
-      ↓
-teacher / DP policy
-      ↓
-u*_k
-      ↓
-environment step
-      ↓
-state/frame_{k+1}
-```
+**NOT SPECIFIED:** validation-split size (early stopping is specified;
+the count is not).
 
 ------------------------------------------------------------------------
 
 # 5. Preprocessing
 
-## 5.1 Training preprocessing
+**PAPER-SPECIFIED** (Section IV.A). Training RGB pipeline, in the order
+listed:
 
-The image preprocessing pipeline is:
+1.  **Color jittering:** brightness 0.05, contrast 0.1, saturation 0.1,
+    hue 0.05, applied in random order for each patch.
+2.  **Color dropping:** grayscale with probability 0.05, luma component.
+3.  **Normalization:** per-channel mean `[0.485, 0.456, 0.406]`, std
+    `[0.229, 0.224, 0.225]`.
+4.  **Resizing:** frames are resized to **64 × 128** using a 5 × 5
+    Gaussian kernel with standard deviation randomly sampled from
+    `[0.1, 0.2]`.
+
+Control commands: **z-score** normalization.
+
+Testing: **resizing and normalization** only (no stochastic
+augmentation), in the **same order as the numbered training list**
+(normalize then Gaussian-resize) so train and eval share one tensor
+domain.
+
+**NOT SPECIFIED:** the paper’s test sentence does not order the two
+stages. This repo follows the training numbered list for both splits.
+Resize is **5×5 Gaussian-kernel resampling** to 64×128 (not
+blur-then-bilinear).
+
+------------------------------------------------------------------------
+
+# 6. Consecutive frames \(\kappa\) and horizon \(K_p\)
+
+**PAPER-SPECIFIED:**
+
+-   Main comparison uses \(\kappa = 2\) consecutive frames
+    (Section IV.D.3) for **supervised** \(\kappa\in\{2,4\}\) (and the
+    generative AE). TS-JEPA itself follows Algorithm 1:
+    \(z_{i,k}=\Psi_\theta(x_{i,k})\) on **one RGB frame**.
+-   Abstract and evaluation use a **15-step** prediction horizon.
+
+**PAPER-IMPLIED baseline embedding dimension:** 256, because the
+predictor output layer has 256 neurons. Fig. 7 also treats embedding
+dimension as a grid-search variable over candidates shown in that
+figure: **64, 128, 256, 350**. The paper does not explicitly name which
+candidate is the final deployed dimension.
+
+Supervised / AE \(\kappa\) packing is **channel concat** to
+`[B, 3\kappa, 64, 128]` (not written in the paper; IC for those
+baselines only).
+
+Formal encoder equation is \(z_{i,k} = \Psi_\theta(x_{i,k})\). Algorithm
+1 encodes each future frame \(x_{i,k+j}\) with the target encoder,
+\(j = 1 \ldots K_p\).
+
+------------------------------------------------------------------------
+
+# 7. Context encoder \(\Psi_\theta\)
+
+**PAPER-SPECIFIED:** deep convolutional ResNet with layers of **64, 128,
+and 256** neurons, each followed by batch normalization and ReLU.
+
+**NOT SPECIFIED:** residual-block count, stem kernel/stride, padding,
+pooling (including global average pool), and the exact head that maps
+the last feature map to the embedding.
+
+Do not write a stem `Conv 7×7`, MaxPool, GAP, or spatial `4×8` pool as
+paper architecture.
+
+------------------------------------------------------------------------
+
+# 8. Target encoder \(\Psi_{\bar\theta}\)
+
+**PAPER-SPECIFIED** (Section III.A, Eq. 14, Algorithm 1):
+
+-   Same architecture as the context encoder.
+-   Initialize \(\bar\theta \leftarrow \theta\).
+-   Block gradients through the target branch.
+-   EMA: \(\bar\theta \leftarrow \eta\,\bar\theta + (1-\eta)\,\theta\).
+-   Table II: \(\eta = 0.99\).
+
+------------------------------------------------------------------------
+
+# 9. Predictor \(P_\phi\)
+
+**PAPER-SPECIFIED** (Eq. 12, Algorithm 1, architecture paragraph):
 
 ``` text
-raw RGB frame
-    ↓
-augmentation
-    ↓
-normalization
-    ↓
-resize / formatting
-    ↓
-encoder
+(ẑ_{i,k+1}, …, ẑ_{i,k+K_p})
+  = P_φ( z_{i,k}  |  ũ_{i,k}, …, ũ_{i,k+K_p−1} )
 ```
 
-The implementation notes specify:
+MLP: hidden layer **1024**, output layer **256**. Autoregressive
+embedding prediction conditioned on predicted commands.
 
--   Color jitter:
-    -   brightness = `0.05`
-    -   contrast = `0.1`
-    -   saturation = `0.1`
-    -   hue = `0.05`
--   Color dropping / grayscale probability = `0.05`
--   ImageNet normalization:
-    -   mean = `[0.485, 0.456, 0.406]`
-    -   std = `[0.229, 0.224, 0.225]`
--   Gaussian blur:
-    -   kernel = `5 × 5`
-    -   sigma sampled from approximately `[0.1, 0.2]`
--   Final resolution = `64 × 128`
+**NOT SPECIFIED:** concat vs other fusion; input width 257; virtual
+channel features (do not add them).
 
-## 5.2 Test preprocessing
+### Predicted commands during TS-JEPA pretraining
 
-Do not apply stochastic training augmentations during testing.
+**NOT SPECIFIED.** Dataset \(D_s\) contains ground-truth \(u_{i,k}\).
+Eq. 12 and Algorithm 1 write \(\tilde u\). The semantic actor is
+trained **after** TS-JEPA, so it cannot be the paper’s pretraining
+\(\tilde u\) source.
 
-Use:
+Status remains **OPEN**. Do not claim teacher forcing is
+paper-specified. Any executable stand-in must be labeled an
+implementation choice.
+
+------------------------------------------------------------------------
+
+# 10. TS-JEPA loss and Algorithm 1
+
+**PAPER-SPECIFIED:** cosine similarity between predicted embeddings and
+target embeddings. Optimize \(\theta\) and \(\phi\) by gradient descent.
+Then EMA-update \(\bar\theta\).
+
+Algorithm 1:
+
+1.  \(z_{i,k} \leftarrow \Psi_\theta(x_{i,k})\)
+2.  For \(j = 1 \ldots K_p\): \(z_{i,k+j} \leftarrow \Psi_{\bar\theta}(x_{i,k+j})\)
+3.  Predict as in Eq. (12)
+4.  Cosine-similarity loss
+5.  Gradient update of \(\theta,\phi\) as in Eq. (13)
+6.  EMA update of \(\bar\theta\)
+
+Do not add VICReg, reconstruction, or other losses and call them
+TS-JEPA.
+
+------------------------------------------------------------------------
+
+# 11. TS-JEPA hyperparameters (Table II)
+
+**PAPER-SPECIFIED** (Table II + surrounding text):
 
 ``` text
-resize + normalization
+optimizer: SGD
+learning rate: 0.2
+batch size: 256
+epochs: 150
+weight decay: 0.0004
+EMA decay η: 0.99
+LR decay: multiply by 0.99 every 20 epochs
 ```
 
-## 5.3 Control normalization
+Do not substitute Adam / LR=0.001 / EMA=0.996 and call it this paper.
 
-Control commands are z-score normalized using training-set statistics:
+Early stopping on validation performance is stated in Section IV.A.
+**NOT SPECIFIED:** patience and validation-set size.
+
+Section IV.A, immediately after describing both Table II (TS-JEPA) and
+Table III (actor) training, states that each experiment is repeated
+five times and the best results are reported. That protocol applies to
+**both** models, not only the actor.
+
+Hardware used in the paper: NVIDIA Tesla V100-PCIE-16GB. Not a
+reproduction requirement.
+
+------------------------------------------------------------------------
+
+# 12. Semantic actor \(C_\varepsilon\)
+
+**PAPER-SPECIFIED** (Section III.B, Eq. 15, Table III):
+
+Trained after TS-JEPA. The context encoder is no longer updated
+(**PAPER-IMPLIED:** training of \(\Psi_\theta\) has ended; the paper
+does not use the word “frozen”). \(D_a\) is built from its embeddings.
+Minimize MSE **on physical commands** \(u\) (Newtons), Eq. 15:
 
 ``` text
-u_norm = (u - μ_u) / σ_u
+(1/K_a) Σ_k || u_{i,k} − ũ_{i,k} ||_2^2
 ```
 
-When reporting or applying physical control, convert back using:
+Z-score normalization is specified for **TS-JEPA** training stability
+(Section IV.A), not as the actor loss domain.
+
+MLP: two hidden layers **1024** and **256**, ReLU after each hidden
+layer, scalar force output for cart-pole.
+
+Table III:
 
 ``` text
-u = u_norm * σ_u + μ_u
+optimizer: AdamW
+learning rate: 0.006
+batch size: 200
+epochs: 300
+dropout: 0.2
+early stopping: yes
+```
+
+Five repeats and reporting the best result: same Section IV.A sentence
+as in Section 11 (covers TS-JEPA and the actor).
+
+**NOT SPECIFIED:** output activation / clipping to \([-20,20]\).
+Desired state \(x_d\) is used in the **scoring function**, not as a
+documented actor input.
+
+------------------------------------------------------------------------
+
+# 13. Wireless model and scheduler
+
+**PAPER-SPECIFIED** (Section II.B, III.C, Algorithms 2, Eqs. 4–10,
+16–25).
+
+Scenario: Indoor Factory Sparse High BS (**InF-SH**). Rayleigh block
+fading, constant over \(\tau_o\), independent across slots. Shadow
+fading standard deviation **4.0** (path-loss text). Tested SNR
+thresholds \(\gamma_{th} \in \{5, 10, 20\}\) dB.
+
+LoS path loss (Eq. 4):
+
+``` text
+PL_LoS_dB = 31.84 + 21.5 log10(D^{3D}_i) + 19 log10(W_c)
+```
+
+LoS probability (Eq. 5); NLoS uses Eqs. 6–7.
+
+SNR (Eq. 8); capacity \(R_{i,k} = W_i \log_2(1+\gamma_{i,k})\) (Eq. 9);
+outage (Eq. 10).
+
+### AoI (Eq. 17 / Algorithm 2)
+
+``` text
+β_{i,k+1} = 1            if device i is scheduled (α_{i,k} = 1)
+β_{i,k+1} = 1 + β_{i,k}  otherwise
+```
+
+Initialize \(\beta_{i,0} = 1\). Do **not** replace this with increments
+of \(\tau_o\) unless reproducing a different paper.
+
+### Virtual queue (Eq. 18)
+
+``` text
+Q_{i,0} = 0
+Q_{i,k+1} = max(Q_{i,k} − β_{i,th}, 0) + β_{i,k}
+```
+
+### Required power (Eq. 23) and index (Eq. 25)
+
+If \(p^{req}_{i,k} > p_{max}\), device is infeasible, \(S_{i,k} = -\infty\).
+Else compute drift-plus-penalty index \(S_{i,k}\). Schedule up to \(J\)
+devices with the largest **positive** \(S_{i,k}\). Scheduled devices
+transmit at \(p_{i,k} = p^{req}_{i,k}\).
+
+### Table IV (geometry / channel only)
+
+**PAPER-SPECIFIED** — Table IV has exactly these 11 rows:
+
+``` text
+hall size:              300 × 150 m²
+room height:            6 m
+BS height h_BS:         10.0 m
+device height h_{i,R}:  1.5 m
+carrier frequency W_c:  3.75 GHz
+total bandwidth:        20 MHz
+clutter height h_c:     3 m
+clutter size D_clutter: 2.0 m
+clutter density δ:      60%
+2D distance D^{2D}_i:   50 m
+noise power N_c:        −95 dB
+```
+
+The paper’s carrier-frequency symbol is **\(W_c\)**, not \(f_c\).
+
+**NOT SPECIFIED** anywhere in the paper (including Table IV): \(I\),
+\(J\), \(V\), \(\beta_{i,th}\), \(p_{max}\). Algorithm 2 needs them to
+run; treat them as implementation choices. Do not hunt Table IV for
+them.
+
+The Lyapunov constant \(B\) in Eq. (22) is **explicitly omitted** by
+the paper (“does not affect the system performance in Lyapunov
+optimization”). It is not a lookup value.
+
+The scheduler is not an input to the predictor.
+
+------------------------------------------------------------------------
+
+# 14. Inference (paper)
+
+**PAPER-SPECIFIED:**
+
+-   After training, context encoder is deployed on devices; predictor
+    and actor on the remote/cloud side.
+-   If an embedding is received: actor maps it to \(\tilde u_{i,k}\).
+-   If not: predictor rolls latent state forward using predicted
+    commands; actor maps predicted embeddings to commands.
+
+**PAPER-IMPLIED:** weights are not updated at inference (the paper
+never says “frozen”). If the actor is trained in the z-score command
+domain, invert z-score before applying Newtons. The paper states
+z-score for training stability, not a separate runtime equation.
+
+------------------------------------------------------------------------
+
+# 15. Evaluation metrics
+
+**PAPER-SPECIFIED** (Section IV.B).
+
+### Encoder quality
+
+t-SNE of embeddings (Fig. 5). Similar states should cluster; embeddings
+should be robust to superficial visual differences (Fig. 5(c)).
+
+### Temporal/spatial consistency (Eq. 26)
+
+MAPE between consecutive frames (also Fig. 4).
+
+### Prediction accuracy (Eq. 27)
+
+``` text
+N^u_{i,K_p}
+  = (1/K_p) Σ |ũ_{i,k} − u_{i,k}|
+    / |max(u) − min(u)|
+```
+
+over the prediction steps in testing.
+
+### Control performance (Eq. 28)
+
+``` text
+R_{i,k} = 1  if |x_{i,k} − x_d| ≤ 0.05  AND  |ϑ_{i,k}| ≤ 0.05
+R_{i,k} = 0  otherwise
+```
+
+Control accuracy is the fraction of steps with \(R_{i,k}=1\).
+Scalability plots use acceptable score in **[0.74, 1.0]**.
+
+### Communication efficiency
+
+Bits to transmit the state or the embedding. Exact raw-frame bit
+accounting must match the paper’s communication-cost figures, not an
+invented \(256 \times 32\) identity unless that is how those figures
+were computed.
+
+------------------------------------------------------------------------
+
+# 16. Paper baselines (Section IV.C)
+
+Control:
+
+1.  Optimal nonlinear DP policy on the high-dimensional state.
+2.  Supervised model: high-dimensional state → command (\(\kappa=2\)
+    and \(\kappa=4\) in Fig. 6).
+3.  Generative autoencoder: reconstruct state, then nonlinear control.
+
+Scheduling (with conventional control):
+
+4.  Round-robin; hold last command if unscheduled.
+5.  Opportunistic (channel-based); hold last command if unscheduled.
+
+------------------------------------------------------------------------
+
+# 17. Reported experimental claims to reproduce
+
+These are paper results, not extra methods:
+
+-   No-prediction (fresh embedding every slot) vs 15-step prediction
+    with a single initial transmission (Fig. 6).
+-   Embedding-dimension grid (Fig. 7).
+-   Training-set size (Fig. 8).
+-   Target SNR 5/10/20 dB (Fig. 9).
+-   Scalability vs round-robin / opportunistic (Figs. 10–11), including
+    packet loss.
+
+------------------------------------------------------------------------
+
+# 18. Explicitly not specified (must not be labeled paper-exact)
+
+The paper is silent on every item below. A reproduction still needs
+executable values; those are **implementation choices (IC)**, recorded
+in `docs/IMPLEMENTATION_CHOICES.md` and `configs/ts_jepa_baseline.yaml`.
+
+Do **not**:
+
+-   put these values in `PLAN_*` paper-spec dicts;
+-   fail `assert_plan_*` solely because an IC field changed;
+-   name tests, comments, or errors as if the paper specified them.
+
+`assert_plan_*` may still require that an IC **key exists** (Algorithm 2
+cannot run without \(J\)). Existence is not a paper number.
+
+Working baseline values are listed so they stay documented. Changing a
+number here does **not** make it paper-exact.
+
+### Native RGB / renderer
+
+**NOT SPECIFIED:** native camera size before resize; renderer;
+anti-aliasing.
+
+Paper specifies only the **resize destination** 64×128 (Section IV.A).
+
+**IC (this repo):** native render `128 × 256 × 3`; coverage anti-aliased
+float rasterizer (`src/ts_jepa/env/renderer.py`). Config:
+`simulation.render_height/width`, `environment.render_resolution`.
+
+### Cart-pole physics and DP numerics
+
+**NOT SPECIFIED:** masses, pole length, gravity, \(N_s\), \(R\),
+integrator, Gym vs custom, DP grids / bins / discount.
+
+**PAPER-IMPLIED:** one DP Bellman transition is one Eq. (1) step, i.e.
+one \(\tau_o\) (`dp_substeps=1` when `dt=τ_o`).
+
+**IC (this repo):** custom `InvertedCartPoleEnv`; \(M=1.0\) kg,
+\(m=0.1\) kg, \(l=0.5\) m, \(g=9.81\), track \(2.4\) m, semi-implicit
+Euler, \(N_s=0\); DP `R=0.001`, discount \(0.99\), 11 force bins,
+grids in `control_teacher.grid`. Method remains nonlinear DP (that
+method **is** paper-specified).
+
+### Frame stacking (\(\kappa\))
+
+**NOT SPECIFIED:** how \(\kappa\) frames become a tensor.
+
+**IC (this repo):** `channel_concat` → `[6, 64, 128]` for \(\kappa=2\).
+Config: `input.multi_frame_tensor_construction`. \(\kappa=2\) itself is
+paper-specified; the 6-channel packing is not.
+
+### ResNet internals
+
+**NOT SPECIFIED:** residual-block count, stem, padding, pooling
+(including GAP), embedding head.
+
+Paper specifies widths **64, 128, 256**, BN, and ReLU.
+
+**IC (this repo):** `blocks_per_stage=2`; stem Conv \(7\times7\) stride 2
+→ BN → ReLU → MaxPool \(3\times3\) stride 2; spatial pool `4×8` (not
+GAP) → flatten → linear. Do not call this stem/head paper architecture.
+
+### Predicted commands \(\tilde u\) during JEPA pretraining
+
+**NOT SPECIFIED.** Status **OPEN** (plan §9). Dataset \(D_s\) has
+ground-truth \(u_{i,k}\); the actor is trained after TS-JEPA.
+
+**IC (this repo):** `teacher_dp` (trajectory \(u^*\));
+`predictor_command_resolution.paper_exact: false`. Inference on a lost
+packet uses the last semantic-actor command (closed loop; separate from
+pretraining). Tests must reject `paper_exact: true`, not require it.
+
+### Predictor concatenation width
+
+**NOT SPECIFIED:** concat vs other fusion; input width 257.
+
+Paper specifies MLP hidden **1024**, output **256**, command-conditioned.
+
+**IC (this repo):** `concat(z, u)` → `Linear(257, 1024)`. Config:
+`predictor.input_tensor_construction`.
+
+### Actor output activation
+
+**NOT SPECIFIED:** tanh / sigmoid / clip to \([-20,20]\) on \(C_\varepsilon\).
+
+Paper specifies hidden ReLU and a scalar force output.
+
+**IC (this repo):** linear head in normalized command space; denorm then
+plant clip to \([-20,+20]\) N. Config:
+`semantic_actor.architecture.output_activation: linear`. Linear is the
+baseline IC, not a paper activation.
+
+### Validation size / patience
+
+**NOT SPECIFIED:** validation cardinality and patience. Early stopping
+itself is paper-specified (Section IV.A).
+
+**IC (this repo):** JEPA: 20 train trajectories held out, patience 20
+epochs. Actor: 20% of actor **train** embeddings, patience 30. Test
+splits (40 / 20) are never used for selection.
+
+### Embedding bit width
+
+**NOT SPECIFIED** as a float format. Plan §15: match the paper’s
+communication-cost **figures**, do not invent \(256\times 32\) unless
+that is how those figures were computed.
+
+**IC / recovered accounting (this repo):** 8 bits per RGB channel and 8
+bits per embedding value, because
+\(1 - (256\times 8)/(64\times 128\times 3\times 8) \approx 98.95\%\).
+That recovery is an accounting hypothesis, not a paper-stated dtype.
+Constant names must not say the paper specified 8-bit embeddings.
+
+### Scheduler scalars \(I, J, V, \beta_{th}, p_{max}\)
+
+**NOT SPECIFIED** in Table IV or the body. Algorithm 2 needs them to
+run.
+
+**IC (this repo):** \(I=4\), \(J=2\), \(V=1.0\), \(\beta_{th}=5.0\),
+\(p_{max}=0.2\) W. Config keys: `num_devices`,
+`max_devices_scheduled_J`, `drift_plus_penalty_V`,
+`aoi_threshold_beta_th`, `p_max_watt`.
+
+### Lyapunov constant \(B\) (Eq. 22)
+
+The paper **omits** \(B\) (“does not affect the system performance in
+Lyapunov optimization”). It is not a lookup value and must not be
+fitted or asserted as paper-exact. This repo omits \(B\) from the index
+(`lyapunov_B_omitted`).
+
+### Out of scope (not in this paper)
+
+Anything named GE-JEPA, BPE, Gilbert–Elliott, burst masking, or
+burst-aware loss.
+
+------------------------------------------------------------------------
+
+# 19. Reproduction order (paper system only)
+
+``` text
+Inverted cart-pole, τ_o = 1 ms, 100 steps, u ∈ [−20, 20] N
+        ↓
+Nonlinear DP teacher (Eqs. 2–3) → D_s
+        ↓
+Preprocessing as Section IV.A
+        ↓
+TS-JEPA: ResNet 64/128/256, EMA target, MLP predictor, cosine loss
+        Table II training
+        ↓
+Trained Ψ_θ (no further encoder updates) → D_a → semantic actor
+        (Eq. 15, Table III)
+        ↓
+Validate encoding (t-SNE), NMAE (Eq. 27), control score (Eq. 28),
+        15-step prediction
+        ↓
+InF-SH channel + Algorithm 2 + Table IV geometry/channel constants
+        (I, J, V, β_th, p_max are implementation choices)
+        ↓
+Figs. 6–11 protocol
 ```
 
 ------------------------------------------------------------------------
 
-# 6. TS-JEPA Architecture
-
-## 6.1 Context Encoder `Ψθ`
-
-The context encoder is a convolutional ResNet-style encoder.
-
-Required channel progression:
-
-``` text
-64 → 128 → 256
-```
-
-Target embedding dimension:
-
-``` text
-d_z = 256
-```
-
-Conceptual structure:
-
-``` text
-Input
-[B, 3, 64, 128]
-(or [B, 6, 64, 128] for κ=2)
-
-        ↓
-
-Conv2D
-3 → 64
-kernel = 7
-stride = 2
-
-        ↓
-
-BatchNorm
-ReLU
-MaxPool
-
-        ↓
-
-Residual stage: 64
-
-        ↓
-
-Residual stage: 128
-stride = 2
-
-        ↓
-
-Residual stage: 256
-stride = 2
-
-        ↓
-
-Global Average Pooling
-
-        ↓
-
-Linear projection
-
-        ↓
-
-256-D embedding
-```
-
-The exact number of residual blocks per stage should not be claimed as a
-paper fact unless recovered from the source.
-
-If the paper does not explicitly specify it, document the chosen
-backbone as an implementation choice.
-
-------------------------------------------------------------------------
-
-# 7. Target Encoder `Ψθ̄`
-
-The target encoder has the same architecture as the context encoder.
-
-Initialization:
-
-``` text
-θ̄ ← θ
-```
-
-The target encoder is not optimized through backpropagation.
-
-Its parameters are updated using EMA:
-
-``` text
-θ̄ ← η θ̄ + (1 - η) θ
-```
-
-The target branch must use stop-gradient:
-
-``` python
-with torch.no_grad():
-    z_bar = target_encoder(...)
-```
-
-This is a fundamental part of the TS-JEPA training mechanism.
-
-The source paper explicitly states that the target encoder mirrors the
-context encoder, is initialized identically, blocks gradients, and is
-updated through EMA.
-
-------------------------------------------------------------------------
-
-# 8. Temporal Configuration
-
-Use:
-
-``` text
-κ = 2
-K_p = 15
-embedding dimension = 256
-```
-
-where:
-
--   `κ` = number of consecutive context frames.
--   `K_p` = prediction horizon.
-
-For a training sample:
-
-``` text
-Context:
-[x_i,k-1, x_i,k]
-
-Control sequence:
-[u_i,k, u_i,k+1, ..., u_i,k+Kp-1]
-
-Target frames:
-[x_i,k+1, x_i,k+2, ..., x_i,k+Kp]
-```
-
-The predictor should generate:
-
-``` text
-[z̃_i,k+1, ..., z̃_i,k+Kp]
-```
-
-------------------------------------------------------------------------
-
-# 9. Predictor `Pϕ`
-
-## 9.1 Required structure
-
-The predictor is an MLP with:
-
-``` text
-input
-   ↓
-Linear
-   ↓
-1024
-   ↓
-ReLU
-   ↓
-Linear
-   ↓
-256
-```
-
-The predictor is applied autoregressively.
-
-At step `j`:
-
-``` text
-current latent
-        +
-predicted control
-        ↓
-predictor
-        ↓
-next latent
-```
-
-Then the predicted latent becomes the next autoregressive state.
-
-## 9.2 Predictor input
-
-The predictor should receive:
-
-``` text
-current embedding
-+
-predicted control command
-```
-
-It must **not** receive invented:
-
--   virtual inputs,
--   virtual channel variables,
--   virtual channel embeddings,
--   unspecified future channel features.
-
-The previous implementation plan incorrectly introduced a virtual-input
-term. That should be removed from the baseline reproduction.
-
-Conceptually:
-
-``` python
-z_current = z_i_k
-
-for j in range(K_p):
-    z_next = predictor(
-        concat([
-            z_current,
-            u_tilde_j
-        ])
-    )
-
-    z_pred.append(z_next)
-    z_current = z_next
-```
-
-The exact tensor/input dimensionality must follow the actual predictor
-implementation once the command-generation mechanism is resolved.
-
-------------------------------------------------------------------------
-
-# 10. IMPORTANT: Predicted-Command Training Ambiguity
-
-This is the main unresolved point in the paper-faithful implementation.
-
-The paper defines the predictor in terms of **predicted commands**:
-
-``` text
-ũ_i,k, ..., ũ_i,k+Kp-1
-```
-
-and Algorithm 1 refers to predicted control commands.
-
-However, the available paper text does not fully specify how the
-complete predicted-command sequence is generated during TS-JEPA
-pretraining.
-
-Therefore:
-
-> **Do not silently invent a mechanism and label it as paper-exact.**
-
-Possible implementation choices must be evaluated and documented
-separately.
-
-Candidate approaches include:
-
-1.  Teacher / ground-truth control sequence used as the conditioning
-    sequence.
-2.  A separately trained semantic actor generates the command sequence.
-3.  A sequential actor-predictor procedure.
-4.  Another mechanism explicitly recovered from the original
-    implementation/source.
-
-The selected approach must be recorded in the experiment configuration
-and paper/reproduction notes.
-
-Until this is resolved, the predictor training implementation should be
-considered:
-
-``` text
-PENDING PAPER/IMPLEMENTATION RESOLUTION
-```
-
-This is preferable to introducing unsupported virtual inputs.
-
-------------------------------------------------------------------------
-
-# 11. JEPA Loss
-
-The TS-JEPA objective is cosine similarity between predicted and target
-embeddings.
-
-For each horizon step:
-
-``` text
-cos_sim(z̃_j, z̄_j)
-=
-(z̃_j · z̄_j)
-/
-(||z̃_j||₂ ||z̄_j||₂)
-```
-
-Loss:
-
-``` text
-L_JEPA
-=
--(1/K_p)
-Σ_{j=1}^{K_p}
-cos_sim(z̃_j, z̄_j)
-```
-
-Target embeddings are generated using the EMA target encoder.
-
-Example:
-
-``` python
-z_context = context_encoder(context)
-
-with torch.no_grad():
-    z_target = [
-        target_encoder(frame)
-        for frame in future_frames
-    ]
-
-z_pred = []
-z_current = z_context
-
-for j in range(K_p):
-    z_next = predictor(...)
-    z_pred.append(z_next)
-    z_current = z_next
-
-loss = -mean(
-    cosine_similarity(z_pred[j], z_target[j])
-    for j in range(K_p)
-)
-```
-
-------------------------------------------------------------------------
-
-# 12. Exact TS-JEPA Training Hyperparameters
-
-Use the following values for the paper-faithful baseline:
-
-  Parameter                                               Value
-  --------------------- ---------------------------------------
-  Optimizer                                                 SGD
-  Learning rate                                           `0.2`
-  Batch size                                              `256`
-  Epochs                                                  `150`
-  Weight decay                                         `0.0004`
-  EMA decay                                              `0.99`
-  LR schedule             multiply LR by `0.99` every 20 epochs
-  Prediction horizon                                       `15`
-  Consecutive frames                                        `2`
-  Embedding dimension                                     `256`
-
-Do not replace these with generic BYOL/JEPA defaults such as:
-
-``` text
-Adam
-LR = 0.001
-EMA = 0.996
-weight decay = 1e-5
-epochs = 200
-```
-
-Those values were present in an earlier implementation draft but should
-**not** be used for the paper-faithful reproduction.
-
-------------------------------------------------------------------------
-
-# 13. TS-JEPA Training Procedure
-
-For every training batch:
-
-### Step 1 --- Context encoding
-
-``` text
-z_i,k = Ψθ(x_i,k)
-```
-
-### Step 2 --- Target encoding
-
-``` text
-z̄_i,k+j = Ψθ̄(x_i,k+j)
-```
-
-with gradients disabled.
-
-### Step 3 --- Autoregressive prediction
-
-Generate:
-
-``` text
-z̃_i,k+1
-...
-z̃_i,k+Kp
-```
-
-using the selected predicted-command mechanism.
-
-### Step 4 --- JEPA loss
-
-``` text
-L_JEPA = -mean(cosine similarity)
-```
-
-### Step 5 --- Gradient update
-
-Update:
-
-``` text
-θ
-ϕ
-```
-
-using SGD.
-
-### Step 6 --- EMA update
-
-Update:
-
-``` text
-θ̄ ← η θ̄ + (1-η) θ
-```
-
-------------------------------------------------------------------------
-
-# 14. Semantic Actor `Cε`
-
-The semantic actor maps the 256-D embedding to the scalar cart control
-command.
-
-Architecture:
-
-``` text
-256
- ↓
-Linear → 1024
- ↓
-ReLU
- ↓
-Linear → 256
- ↓
-ReLU
- ↓
-Linear → 1
-```
-
-Output:
-
-``` text
-ũ_i,k
-```
-
-The actor is trained as supervised regression.
-
-Loss:
-
-``` text
-L_actor
-=
-MSE(ũ_i,k, u_i,k)
-```
-
-The TS-JEPA encoder is frozen during actor training.
-
-------------------------------------------------------------------------
-
-# 15. Semantic Actor Training
-
-Use the trained TS-JEPA context encoder.
-
-For every sample:
-
-``` text
-x_i,k
-   ↓
-frozen Ψθ
-   ↓
-z_i,k
-   ↓
-Cε
-   ↓
-ũ_i,k
-```
-
-Compute:
-
-``` text
-MSE(ũ_i,k, u_i,k)
-```
-
-and optimize only `Cε`.
-
-The current implementation specification uses:
-
-  Parameter                              Value
-  ------------------- ------------------------
-  Architecture          `256 → 1024 → 256 → 1`
-  Hidden activation                       ReLU
-  Dropout                                `0.2`
-  Optimizer                              AdamW
-  Learning rate                        `0.006`
-  Batch size                             `200`
-  Epochs                                 `300`
-  Early stopping                       Enabled
-  Repetitions                              `5`
-  Selection             Best validation result
-
-The five-repetition procedure should report the best result, consistent
-with the implementation notes.
-
-------------------------------------------------------------------------
-
-# 16. Baseline Validation --- Mandatory Before Wireless
-
-Before implementing the wireless scheduler, validate the TS-JEPA +
-semantic actor system.
-
-Required checks:
-
-### 16.1 Embedding quality
-
-Use t-SNE or another appropriate visualization to inspect whether
-semantically similar states have meaningful latent structure.
-
-### 16.2 Actor prediction
-
-Evaluate:
-
-``` text
-NMAE
-```
-
-between predicted and ground-truth control.
-
-### 16.3 Control performance
-
-Run the closed-loop cart-pole system and calculate the control score.
-
-### 16.4 Horizon prediction
-
-Inspect prediction quality over:
-
-``` text
-1 ... 15
-```
-
-steps.
-
-Do not only report the average loss.
-
-### 16.5 Communication reduction
-
-Compare latent transmission with raw RGB-frame transmission.
-
-### 16.6 Stability
-
-Check whether the system remains stable when using the selected
-predicted-command mechanism and temporal resolution.
-
-Only after these tests pass should the wireless scheduler be introduced.
-
-------------------------------------------------------------------------
-
-# 17. Wireless Channel Model
-
-The wireless component should be implemented after the baseline.
-
-The implementation sequence is:
-
-``` text
-InF-SH environment
-        ↓
-LoS / NLoS path loss
-        ↓
-Rayleigh block fading
-        ↓
-Required transmit power
-        ↓
-Feasibility test
-        ↓
-AoI update
-        ↓
-Virtual queue update
-        ↓
-Drift-plus-penalty score
-        ↓
-Select up to J devices
-```
-
-The paper uses an Indoor Factory Sparse clutter (InF-SH) scenario.
-
-## 17.1 Channel capacity
-
-Conceptually:
-
-``` text
-C_i,k = B log2(1 + γ_i,k)
-```
-
-## 17.2 Outage
-
-``` text
-P_out,i = P(γ_i,k < γ_th)
-```
-
-The tested SNR thresholds are:
-
-``` text
-γ_th ∈ {5, 10, 20} dB
-```
-
-## 17.3 Rayleigh block fading
-
-Use a block-fading Rayleigh channel coefficient per transmission.
-
-The exact wireless parameter values from Table IV must be recovered from
-the paper before claiming a paper-exact wireless reproduction.
-
-Do not silently substitute arbitrary values for:
-
--   bandwidth `B`
--   carrier frequency `f_c`
--   noise power `σ²`
--   path-loss exponent `α`
--   number of devices `I`
--   resource blocks `J`
--   AoI threshold `β_th`
--   Lyapunov parameter `V`
-
-------------------------------------------------------------------------
-
-# 18. AoI and Virtual Queue
-
-The AoI logic must follow the paper.
-
-At each time step:
-
-### Successful transmission
-
-``` text
-Δ_i,k+1 = τ_o
-```
-
-### Unscheduled device
-
-``` text
-Δ_i,k+1 = Δ_i,k + τ_o
-```
-
-### Scheduled but failed/outage transmission
-
-``` text
-Δ_i,k+1 = Δ_i,k + τ_o
-```
-
-The virtual queue tracks the long-term AoI constraint.
-
-Initialize:
-
-``` text
-Q_i,0 = 0
-```
-
-The implementation notes use:
-
-``` text
-Q_i,k+1 =
-max(Q_i,k + β_i,th - τ_i,k, 0)
-```
-
-where `τ_i,k` is the relevant time-since-success quantity.
-
-The queue must be updated consistently with the AoI state used in the
-scheduler.
-
-------------------------------------------------------------------------
-
-# 19. Required Transmit Power
-
-For a transmission requiring `N_b` bits:
-
-``` text
-N_b = 256 × 32
-    = 8192 bits
-```
-
-The required power is computed from the channel reliability/capacity
-constraint.
-
-Do not hard-code a simplified power formula until the paper's exact
-notation and parameterization have been checked.
-
-------------------------------------------------------------------------
-
-# 20. Drift-Plus-Penalty Scheduler
-
-The scheduler should:
-
-1.  Observe channel state.
-2.  Compute required transmission power.
-3.  Mark infeasible devices.
-4.  Compute the drift-plus-penalty scheduling score.
-5.  Ignore non-positive candidates.
-6.  Select at most `J` devices.
-7.  Transmit selected devices.
-8.  Update AoI.
-9.  Update virtual queues.
-10. Use predicted control for devices whose state is not freshly
-    transmitted.
-
-The exact values of:
-
-``` text
-I
-J
-V
-β_th
-p_max
-```
-
-must be recovered from the paper before final paper-exact experiments.
-
-------------------------------------------------------------------------
-
-# 21. Full Inference Loop
-
-## 21.1 Device
-
-``` python
-def device_step(frame):
-    frame = preprocess(frame)
-
-    z = context_encoder(frame)
-
-    if scheduled:
-        transmit(z)
-```
-
-The transmitted embedding contains:
-
-``` text
-256 float32 values
-= 8192 bits
-```
-
-## 21.2 Controller
-
-If a fresh embedding is received:
-
-``` text
-current_z = received_z
-```
-
-Otherwise:
-
-``` text
-current_z = predictor(previous_z, predicted_command)
-```
-
-Then:
-
-``` text
-ũ = semantic_actor(current_z)
-```
-
-Convert the normalized command back to physical units and apply it to
-the cart-pole controller.
-
-For future unscheduled steps, use autoregressive latent prediction and
-the semantic actor to generate future commands.
-
-------------------------------------------------------------------------
-
-# 22. Evaluation Metrics
-
-## 22.1 Prediction NMAE
-
-The normalized mean absolute error is:
-
-``` text
-NMAE =
-(1/Kp)
-Σ |ũ_k - u_k|
-/
-(max(u) - min(u))
-```
-
-For the cart-pole control range:
-
-``` text
-max(u) - min(u) = 40 N
-```
-
-Lower is better.
-
-## 22.2 Control accuracy
-
-Define:
-
-``` text
-R_i,k = 1
-```
-
-when:
-
-``` text
-|x_i,k - x_d| ≤ 0.05
-AND
-|θ_i,k| ≤ 0.05
-```
-
-Otherwise:
-
-``` text
-R_i,k = 0
-```
-
-Control accuracy is the fraction of evaluated time steps satisfying this
-condition.
-
-## 22.3 Temporal consistency
-
-The implementation notes include a frame-level MAPE-style temporal
-consistency metric.
-
-Use the paper's exact definition when reproducing the reported value.
-
-## 22.4 Communication efficiency
-
-Embedding transmission:
-
-``` text
-256 floats × 32 bits
-= 8192 bits
-```
-
-Compare this against the raw RGB-frame transmission baseline.
-
-The paper reports a very large communication reduction; reproduce the
-calculation using the exact frame representation and transmission
-assumptions used in the paper rather than relying only on the nominal
-embedding size.
-
-## 22.5 Latent visualization
-
-Use t-SNE as an auxiliary diagnostic to inspect the structure of learned
-embeddings.
-
-------------------------------------------------------------------------
-
-# 23. Paper-Faithful Reproduction Checklist
+# 20. Paper-faithful checklist
 
 ## Environment
 
--   [ ] Custom inverted cart-pole implemented.
--   [ ] Paper dynamics verified.
--   [ ] Horizontal force control implemented.
--   [ ] `u ∈ [-20,20] N`.
--   [ ] `τ_o = 1 ms`.
--   [ ] RGB rendering implemented.
--   [ ] `64 × 128` resolution verified.
+-   [ ] Inverted cart-pole, RGB state.
+-   [ ] \(\tau_o = 1\) ms, 100 steps.
+-   [ ] \(u \in [-20, +20]\) N, horizontal force.
+-   [ ] Nonlinear DP teacher (not uniform random, not LQR-as-paper).
 
-## Dataset
+## Data
 
--   [ ] `D_s`: 200 train + 40 test trajectories.
--   [ ] `D_a`: 100 train + 20 test trajectories.
--   [ ] 100 steps per trajectory.
--   [ ] DP/nonlinear teacher implemented.
--   [ ] No independent uniform action sampling.
--   [ ] Train/test split verified.
+-   [ ] \(D_s\): 200 / 40 trajectories of (frame, command).
+-   [ ] \(D_a\): 100 / 20 trajectories of (embedding, command).
+-   [ ] Actor data from the trained context encoder (no further encoder
+        updates).
+
+## Preprocess
+
+-   [ ] Jitter 0.05 / 0.1 / 0.1 / 0.05, random order.
+-   [ ] Color drop \(p=0.05\), luma.
+-   [ ] ImageNet mean/std as published.
+-   [ ] Resize to 64×128 with 5×5 Gaussian, \(\sigma \in [0.1, 0.2]\).
+-   [ ] Test: resize + normalize only.
+-   [ ] Command z-score.
 
 ## TS-JEPA
 
--   [ ] `κ = 2`.
--   [ ] `K_p = 15`.
--   [ ] Embedding dimension = 256.
--   [ ] Encoder channels = `64 → 128 → 256`.
--   [ ] Target encoder initialized from context encoder.
--   [ ] Target branch uses stop-gradient.
--   [ ] EMA target update implemented.
--   [ ] Predictor = `1024 → 256`.
--   [ ] No invented virtual-channel inputs.
--   [ ] Cosine embedding loss implemented.
--   [ ] Predicted-command mechanism explicitly documented.
-
-## Training
-
--   [ ] SGD.
--   [ ] LR = 0.2.
--   [ ] Batch size = 256.
--   [ ] Epochs = 150.
--   [ ] Weight decay = 0.0004.
--   [ ] EMA = 0.99.
--   [ ] LR ×0.99 every 20 epochs.
+-   [ ] \(\kappa=2\) in the main comparison.
+-   [ ] \(K_p = 15\).
+-   [ ] ResNet widths 64→128→256, BN, ReLU.
+-   [ ] Target = copy, stop-grad, EMA \(\eta=0.99\).
+-   [ ] Predictor MLP 1024→256, command-conditioned.
+-   [ ] No virtual-channel predictor inputs.
+-   [ ] Cosine embedding loss; Algorithm 1 order.
+-   [ ] SGD, LR 0.2, batch 256, 150 epochs, wd 0.0004, LR×0.99 / 20
+        epochs.
+-   [ ] Five experimental repeats; report best (Section IV.A; both
+        models).
+-   [ ] \(\tilde u\) pretraining source documented as NOT SPECIFIED.
 
 ## Actor
 
--   [ ] `256 → 1024 → 256 → 1`.
--   [ ] ReLU hidden layers.
--   [ ] Dropout = 0.2.
--   [ ] AdamW.
--   [ ] LR = 0.006.
--   [ ] Batch size = 200.
--   [ ] 300 epochs.
--   [ ] Early stopping.
--   [ ] Five repetitions.
--   [ ] Frozen TS-JEPA encoder.
-
-## Baseline validation
-
--   [ ] t-SNE.
--   [ ] NMAE.
--   [ ] Control score.
--   [ ] 15-step latent prediction analysis.
--   [ ] Communication analysis.
--   [ ] Closed-loop stability.
-
-## Wireless
-
--   [ ] InF-SH environment.
--   [ ] LoS/NLoS path loss.
--   [ ] Rayleigh block fading.
--   [ ] Required transmit power.
--   [ ] Feasibility check.
--   [ ] AoI update.
--   [ ] Virtual queue.
--   [ ] Drift-plus-penalty score.
--   [ ] Top-J scheduling.
--   [ ] Exact Table IV values recovered.
-
-------------------------------------------------------------------------
-
-# 24. GE-JEPA Extension
-
-Only after the TS-JEPA baseline is validated:
-
-``` text
-Validated TS-JEPA
-        ↓
-Gilbert-Elliott channel
-        ↓
-Burst-loss masking
-        ↓
-Burst Position Encoding (BPE)
-        ↓
-Burst-aware JEPA objective
-        ↓
-GE-JEPA evaluation
-```
-
-## 24.1 What must remain unchanged
-
-The extension should preserve:
-
--   Context encoder.
--   Target encoder.
--   EMA target update.
--   Stop-gradient target branch.
--   Basic predictor structure.
--   Future embedding prediction.
--   Base semantic actor unless a specific experiment evaluates a changed
-    actor.
-
-## 24.2 What GE-JEPA adds
-
-GE-JEPA adds:
-
-1.  Gilbert-Elliott channel model.
-2.  Burst-loss masking.
-3.  Burst Position Encoding.
-4.  Burst-aware predictive loss.
-
-The first packet-loss experiments should use the original validated
-TS-JEPA predictor.
-
-Do not simultaneously change the predictor, encoder, channel model, and
-loss when first introducing burst losses.
-
-------------------------------------------------------------------------
-
-# 25. Experimental Ablation Plan
-
-Recommended progression:
-
-  Experiment   Description
-  ------------ ----------------------------------------------
-  E0           Original TS-JEPA, no packet loss
-  E1           TS-JEPA + independent packet-loss simulation
-  E2           TS-JEPA + wireless scheduling
-  E3           TS-JEPA + Gilbert-Elliott burst channel
-  E4           E3 + Burst Position Encoding
-  E5           E4 + burst-aware JEPA objective
-  E6           Full GE-JEPA
-
-For every experiment report at minimum:
-
--   Prediction NMAE.
--   Control accuracy.
--   Closed-loop stability.
--   Communication cost.
--   Performance versus packet/burst loss.
--   Performance versus burst length.
--   Performance versus channel conditions.
-
-This structure isolates the contribution of each GE-JEPA component.
-
-------------------------------------------------------------------------
-
-# 26. Known Unresolved Items
-
-The following must not be silently treated as paper facts until
-verified.
-
-## 26.1 Predicted command generation during TS-JEPA training
-
-The paper requires predicted commands but does not completely specify
-how the entire command sequence is generated during training.
-
-**Status: OPEN**
-
-This is currently the most important reproduction ambiguity.
-
-## 26.2 Exact residual-block counts
-
-The text establishes the `64 → 128 → 256` channel progression, but the
-exact number of residual blocks per stage should be verified before
-calling a specific ResNet depth paper-exact.
-
-**Status: VERIFY**
-
-## 26.3 Exact Table IV wireless parameters
-
-Recover:
-
-``` text
-B
-f_c
-σ²
-α
-I
-J
-β_th
-V
-p_max
-```
-
-from the paper's table before final wireless experiments.
-
-**Status: VERIFY**
-
-## 26.4 Exact communication baseline representation
-
-The 8192-bit embedding size is straightforward, but the exact raw-frame
-transmission calculation must use the same representation/assumptions as
-the paper.
-
-**Status: VERIFY**
-
-------------------------------------------------------------------------
-
-# 27. Reproduction Rules
-
-The following rules should be followed throughout implementation:
-
-1.  **Never replace an unspecified paper detail with a generic default
-    and call it paper-exact.**
-2.  **Keep paper facts and implementation choices explicitly
-    separated.**
-3.  **Do not add virtual inputs to the predictor unless the source
-    explicitly requires them.**
-4.  **Do not use random Uniform(-20,20) actions for the teacher dataset
-    when reproducing the current corrected setup.**
-5.  **Validate TS-JEPA before implementing wireless scheduling.**
-6.  **Validate the wireless baseline before introducing Gilbert-Elliott
-    burst losses.**
-7.  **Introduce BPE and the burst-aware loss as separate ablations.**
-8.  **Keep the original TS-JEPA architecture fixed while measuring the
-    contribution of GE-JEPA components.**
-9.  **Record every unresolved implementation choice in experiment
-    configuration files and experiment logs.**
-10. **Do not report an implementation choice as an original-paper
-    fact.**
-
-------------------------------------------------------------------------
-
-# 28. Final Implementation Roadmap
-
-``` text
-PHASE 1
-Custom inverted CartPole
-        ↓
-Validate dynamics + RGB rendering
-
-PHASE 2
-DP/nonlinear teacher
-        ↓
-Generate Ds / Da
-        ↓
-Validate trajectories and action distribution
-
-PHASE 3
-TS-JEPA encoder
-        ↓
-Target encoder
-        ↓
-Predictor
-        ↓
-EMA
-        ↓
-Cosine loss
-
-PHASE 4
-Resolve predicted-command generation
-        ↓
-Document decision
-
-PHASE 5
-Train TS-JEPA
-        ↓
-Validate latent prediction
-        ↓
-Validate embeddings
-
-PHASE 6
-Train semantic actor
-        ↓
-NMAE
-        ↓
-Closed-loop control score
-
-PHASE 7
-Freeze validated baseline
-        ↓
-Implement wireless channel
-        ↓
-Implement scheduler
-        ↓
-Validate packet-loss operation
-
-PHASE 8
-Gilbert-Elliott burst channel
-        ↓
-Burst masking
-
-PHASE 9
-Burst Position Encoding
-
-PHASE 10
-Burst-aware JEPA loss
-
-PHASE 11
-Full GE-JEPA evaluation
-        ↓
-Ablation study
-        ↓
-Paper results
-```
-
-------------------------------------------------------------------------
-
-# 29. Baseline Definition
-
-For the project, the canonical baseline should be:
-
-``` text
-Custom inverted CartPole
-+
-DP/nonlinear teacher
-+
-RGB observations
-+
-κ = 2
-+
-ResNet-style 64→128→256 encoder
-+
-256-D embedding
-+
-EMA target encoder
-+
-1024→256 predictor
-+
-Kp = 15
-+
-cosine JEPA loss
-+
-paper-faithful SGD training
-+
-frozen semantic actor
-+
-paper wireless scheduler
-```
-
-GE-JEPA is then defined as the extension:
-
-``` text
-TS-JEPA baseline
-+
-Gilbert-Elliott burst channel
-+
-burst masking
-+
-Burst Position Encoding
-+
-burst-aware JEPA objective
-```
-
-The baseline must be treated as frozen once validated so that the
-GE-JEPA contribution can be measured cleanly.
-
-------------------------------------------------------------------------
-
-# 30. Source Status
-
-This document is based primarily on:
-
--   The supplied TS-JEPA paper PDF.
--   The current reproduction/implementation notes.
--   Corrections identified during the architecture and implementation
-    cross-check.
-
-Where the source material does not fully specify a value or mechanism,
-this document intentionally marks it as unresolved instead of
-fabricating a paper-exact answer.
+-   [ ] 1024 and 256 hidden, ReLU, MSE.
+-   [ ] AdamW, LR 0.006, batch 200, 300 epochs, dropout 0.2.
+-   [ ] Early stopping; same five-repeat / best-reported protocol as
+        TS-JEPA.
+-   [ ] Encoder not updated during actor training.
+
+## Metrics / wireless
+
+-   [ ] NMAE Eq. (27); score Eq. (28) with 0.05 thresholds.
+-   [ ] t-SNE; Fig. 4 MAPE analysis.
+-   [ ] AoI Eq. (17); queue Eq. (18); Algorithm 2.
+-   [ ] Table IV geometry/channel constants only (hall, heights,
+        \(W_c\), bandwidth, clutter, 2D distance, \(N_c\)).
+-   [ ] \(I\), \(J\), \(V\), \(\beta_{th}\), \(p_{max}\) documented as
+        NOT SPECIFIED.
+-   [ ] \(\gamma_{th} \in \{5,10,20\}\) dB.

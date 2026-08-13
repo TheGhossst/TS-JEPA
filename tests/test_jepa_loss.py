@@ -1,4 +1,4 @@
-"""Plan §11 JEPA cosine alignment loss tests."""
+"""Plan §10 JEPA cosine alignment loss tests."""
 
 from __future__ import annotations
 
@@ -75,8 +75,8 @@ def test_tsjepa_training_tensors_use_plan_loss():
     config = load_config()
     model = TSJEPA(config)
     b, kp = 2, int(config["ts_jepa"]["prediction_horizon"]["Kp"])
-    context = torch.randn(b, 6, 64, 128)
-    future = torch.randn(b, kp, 6, 64, 128)
+    context = torch.randn(b, 3, 64, 128)
+    future = torch.randn(b, kp, 3, 64, 128)
     commands = torch.randn(b, kp)
     z = model.encode_context(context)
     z_tgt = model.encode_targets(future)
@@ -90,5 +90,19 @@ def test_tsjepa_training_tensors_use_plan_loss():
 def test_plan_jepa_loss_config_rejects_wrong_objective():
     config = copy.deepcopy(load_config())
     config["ts_jepa"]["loss"]["paper_objective"] = "mse"
-    with pytest.raises(ValueError, match="Plan §11"):
+    with pytest.raises(ValueError, match="Plan §10"):
+        assert_plan_jepa_loss_config(config)
+
+
+def test_plan_jepa_loss_config_rejects_vicreg():
+    config = copy.deepcopy(load_config())
+    config["ts_jepa"]["loss"]["paper_objective"] = "vicreg"
+    with pytest.raises(ValueError, match="Plan §10"):
+        assert_plan_jepa_loss_config(config)
+
+
+def test_plan_jepa_loss_config_rejects_reconstruction_weight():
+    config = copy.deepcopy(load_config())
+    config["ts_jepa"]["loss"]["reconstruction_weight"] = 1.0
+    with pytest.raises(ValueError, match="reconstruction"):
         assert_plan_jepa_loss_config(config)

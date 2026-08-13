@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from ts_jepa.config import load_config
 from ts_jepa.control.dp_teacher import DPControlTeacher
@@ -24,7 +25,7 @@ def _tiny_teacher(**kwargs) -> DPControlTeacher:
         value_iteration_iters=3,
         control_effort_weight=0.001,
         discount=0.99,
-        dp_substeps=50,
+        dp_substeps=1,
         desired_state=[0.0, 0.0, 0.0, 0.0],
     )
     defaults.update(kwargs)
@@ -35,7 +36,7 @@ def test_baseline_config_dp_grid_and_forces():
     config = load_config()
     ct = config["control_teacher"]
     assert ct["force_bins"] == 11
-    assert ct["dp_substeps"] == 50
+    assert ct["dp_substeps"] == 1
     assert ct["value_iteration_iters"] == 50
     assert ct["control_effort_weight"] == 0.001
     assert ct["discount"] == 0.99
@@ -48,10 +49,15 @@ def test_baseline_config_dp_grid_and_forces():
 
 
 def test_dp_substeps_and_effective_dt():
-    teacher = _tiny_teacher(dp_substeps=50)
-    assert teacher.dp_substeps == 50
-    assert teacher.effective_dp_dt == 0.05
+    teacher = _tiny_teacher(dp_substeps=1)
+    assert teacher.dp_substeps == 1
+    assert teacher.effective_dp_dt == 0.001
     assert teacher.env.ode.dt == 0.001
+
+
+def test_dp_substeps_not_equal_to_one_rejected():
+    with pytest.raises(ValueError, match="dp_substeps must be 1"):
+        _tiny_teacher(dp_substeps=50)
 
 
 def test_force_grid_eleven_bins():
@@ -61,7 +67,7 @@ def test_force_grid_eleven_bins():
 
 
 def test_successor_state_rollout_constant_force():
-    teacher = _tiny_teacher(dp_substeps=50)
+    teacher = _tiny_teacher(dp_substeps=1)
     s0 = np.array([0.0, 0.0, 0.1, 0.0], dtype=np.float64)
     final, stage = teacher._rollout_constant_force(s0, 0.0)
     assert isinstance(stage, float)
@@ -76,13 +82,11 @@ def test_successor_state_rollout_constant_force():
     assert stage20 > control_once
     state_part = stage20 - control_once
     assert state_part > 0.0
-    # If control were charged N times, control would be N*control_once.
     assert abs(stage20 - (state_part + control_once)) < 1e-9
-    assert abs(stage20 - (state_part + teacher.dp_substeps * control_once)) > 1e-3
 
 
-def test_bellman_uses_s_N_not_current_state_only():
-    teacher = _tiny_teacher(dp_substeps=50, value_iteration_iters=5)
+def test_bellman_uses_successor_not_current_state_only():
+    teacher = _tiny_teacher(dp_substeps=1, value_iteration_iters=5)
     s = np.array([0.0, 0.0, 0.12, 0.0], dtype=np.float64)
     q0 = teacher._bellman_cost(s, 0.0)
     # A large restoring-side force should generally change Q vs zero (not force-independent).

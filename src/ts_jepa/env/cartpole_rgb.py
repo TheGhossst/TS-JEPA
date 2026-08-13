@@ -17,8 +17,8 @@ class InvertedCartPoleEnv:
 
     def __init__(
         self,
-        render_height: int = 64,
-        render_width: int = 128,
+        render_height: int = 128,
+        render_width: int = 256,
         dt: float = 0.001,
         force_min: float = -20.0,
         force_max: float = 20.0,
@@ -26,6 +26,7 @@ class InvertedCartPoleEnv:
         params: CartPoleParams | None = None,
         process_noise_std: float = 0.0,
         init_noise: float = 0.05,
+        observation_stride_steps: int = 1,
     ) -> None:
         self.params = params or CartPoleParams()
         self.ode = CartPoleODE(params=self.params, dt=dt)
@@ -34,6 +35,7 @@ class InvertedCartPoleEnv:
             width=render_width,
             params=self.params,
         )
+        self.observation_stride_steps = max(1, int(observation_stride_steps))
         self.force_min = float(force_min)
         self.force_max = float(force_max)
         self.desired_state = np.asarray(
@@ -71,13 +73,27 @@ class InvertedCartPoleEnv:
         theta_ok = abs(float(s[2])) <= angle_tol
         return int(x_ok and theta_ok)
 
-    def rollout(self, teacher: ControlPolicy, steps: int, seed: int) -> dict[str, np.ndarray]:
+    def rollout(
+        self,
+        teacher: ControlPolicy,
+        steps: int,
+        seed: int,
+        observation_stride_steps: int | None = None,
+    ) -> dict[str, np.ndarray]:
         """
-        Roll out `steps` transitions with a control policy.
+        Roll out `steps` stored observations with a control policy.
 
-        Plan §4.1 per step k:
-          observe state_k → render frame_k → teacher.act(state_k) → u*_k → step → state_{k+1}
+        Physics advances at dt = τ_o (1 ms). Paper-faithful datasets store one
+        sample per τ_o (`observation_stride_steps=1`, 100 steps). A larger stride
+        is an implementation choice and is not the Section IV setup.
+
+        Per stored step k:
+          observe state_k → render frame_k → teacher.act(state_k) → u*_k
+          → apply u*_k for observation_stride_steps physics steps → state_{k+1}
         """
+        stride = int(self.observation_stride_steps if observation_stride_steps is None else observation_stride_steps)
+        if stride < 1:
+            raise ValueError(f"observation_stride_steps must be >= 1, got {stride}")
         state = self.reset(seed=seed)
         frames = []
         commands = []
@@ -87,7 +103,8 @@ class InvertedCartPoleEnv:
             frames.append(self.render(state))
             commands.append(force)
             states.append(state.copy())
-            state, _ = self.step(force)
+            for _ in range(stride):
+                state, _ = self.step(force)
         return {
             "frames": np.stack(frames, axis=0).astype(np.uint8),
             "commands": np.asarray(commands, dtype=np.float32),

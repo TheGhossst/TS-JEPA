@@ -33,13 +33,18 @@ class TSJEPA(nn.Module):
         inp = config["input"]
         enc_cfg = config["ts_jepa"]["encoder"]
         pred_cfg = config["ts_jepa"]["predictor"]
-        in_channels = int(inp["channels_per_rgb_frame"]) * int(inp["kappa"])
+        # Algorithm 1: Ψ(x_{i,k}) on one RGB frame (3 channels). κ concat is for
+        # supervised / AE baselines only (Section IV.D.3).
+        in_channels = int(inp["channels_per_rgb_frame"])
         embedding_dim = int(enc_cfg["embedding_dim"])
+        strict_dim = not bool(config.get("experiments", {}).get("allow_non_baseline_embedding_dim", False))
         self.context_encoder = ContextEncoder(
             in_channels=in_channels,
             widths=list(enc_cfg["widths"]),
             embedding_dim=embedding_dim,
             blocks_per_stage=int(enc_cfg.get("blocks_per_stage", 2)),
+            spatial_pool_hw=tuple(enc_cfg.get("spatial_pool_hw", [4, 8])),
+            strict_baseline_dim=strict_dim,
         )
         self.target_encoder = initialize_target_from_context(self.context_encoder)
         assert_target_initialized_from_context(self.context_encoder, self.target_encoder)
@@ -48,6 +53,7 @@ class TSJEPA(nn.Module):
             command_dim=1,
             hidden_dim=int(pred_cfg["hidden_dim"]),
             output_dim=int(pred_cfg["output_dim"]),
+            strict_baseline_dim=strict_dim,
         )
         self.command_source = str(pred_cfg.get("command_source", "teacher_dp"))
         self.command_resolution: PredictorCommandResolution = load_predictor_command_resolution(config)
@@ -60,9 +66,9 @@ class TSJEPA(nn.Module):
     @torch.no_grad()
     def encode_targets(self, future_frames: torch.Tensor, chunk_size: int = 256) -> torch.Tensor:
         """
-        Plan §7: target encoder forward with stop-gradient.
+        Plan §8: target encoder forward with stop-gradient.
 
-        future_frames: [B, Kp, C_kappa, H, W] → [B, Kp, D].
+        future_frames: [B, Kp, 3, H, W] → [B, Kp, D] (one RGB frame per target step).
         """
         b, kp, c, h, w = future_frames.shape
         flat = future_frames.reshape(b * kp, c, h, w)
@@ -76,8 +82,8 @@ class TSJEPA(nn.Module):
         """
         Autoregressive latent prediction conditioned on `commands_norm`.
 
-        Plan §10: during baseline training these are DP teacher trajectory commands
-        (command_source=teacher_dp), not claimed to be paper ũ until §10 is resolved.
+        Plan §9: during baseline training these are DP teacher trajectory commands
+        (command_source=teacher_dp), not claimed to be paper ũ (pretraining ũ is OPEN).
         """
         return self.predictor(embedding, commands_norm, horizon=horizon or self.kp)
 

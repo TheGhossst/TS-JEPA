@@ -54,14 +54,14 @@ def _generate(config: dict) -> Path:
     return root
 
 
-def test_baseline_early_stopping_disabled():
+def test_baseline_early_stopping_enabled():
     config = load_config()
-    assert config["ts_jepa"]["early_stopping"]["enabled"] is False
+    assert config["ts_jepa"]["early_stopping"]["enabled"] is True
 
 
-def test_dp_fixed_early_stopping_disabled():
+def test_dp_fixed_early_stopping_enabled():
     config = load_config("configs/ts_jepa_dp_fixed.yaml")
-    assert config["ts_jepa"]["early_stopping"]["enabled"] is False
+    assert config["ts_jepa"]["early_stopping"]["enabled"] is True
 
 
 def test_resumable_checkpoint_contains_required_fields(tmp_path: Path):
@@ -317,3 +317,14 @@ def test_early_stopping_still_available_when_enabled(tmp_path: Path):
     train_ts_jepa(config, device=torch.device("cpu"), max_epochs=10, data_root=root, seed=0, run_dir=runs)
     ckpt = load_checkpoint(runs / "last.pt")
     assert len(ckpt["history"]) < 10
+
+
+def test_seed_training_complete_requires_epoch_budget(tmp_path: Path):
+    from ts_jepa.training.train_jepa import seed_training_complete
+
+    run_dir = tmp_path / "seed_0"
+    run_dir.mkdir()
+    (run_dir / "metrics.json").write_text('{"seed": 0, "test_loss": -0.98}', encoding="utf-8")
+    torch.save({"test_loss": -0.98, "epoch": 2, "history": [{"epoch": 1}, {"epoch": 2}]}, run_dir / "last.pt")
+    assert seed_training_complete(run_dir, expected_epochs=2) is True
+    assert seed_training_complete(run_dir, expected_epochs=150) is False

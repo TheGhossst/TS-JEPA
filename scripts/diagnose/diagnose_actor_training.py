@@ -18,13 +18,13 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 
-from ts_jepa.config import actor_run_dirname, jepa_run_dirname, load_config, project_root
+from ts_jepa.config import actor_run_dirname, load_config, project_root
 from ts_jepa.data.datasets import ActorEmbeddingDataset, load_command_normalizer
 from ts_jepa.device import describe_device, select_device
-from ts_jepa.evaluation.checkpoints import resolve_run_checkpoint
+from ts_jepa.evaluation.checkpoints import resolve_jepa_checkpoint_from_actor, resolve_run_checkpoint
 from ts_jepa.models.actor import SemanticActor
 from ts_jepa.models.ts_jepa import TSJEPA
-from ts_jepa.training.train_actor import _split_train_val_actor
+from ts_jepa.training.actor_helpers import split_train_val_actor
 
 
 def _tensor_stats(x: np.ndarray, *, num_pairs: int = 5000, seed: int = 0) -> dict[str, Any]:
@@ -87,7 +87,7 @@ def _collect_embeddings(
         z_list.append(item["embedding"].numpy())
         cmd_norm = float(item["command_norm"].reshape(-1)[0].item())
         norm_list.append(cmd_norm)
-        phys_list.append(float(normalizer.denormalize(np.array([cmd_norm], dtype=np.float32))[0]))
+        phys_list.append(float(item["command"].reshape(-1)[0].item()))
     return np.stack(z_list, axis=0), np.asarray(norm_list), np.asarray(phys_list)
 
 
@@ -236,8 +236,8 @@ def _forward_pass_report(
     actor.eval()
     z_t = torch.from_numpy(z).to(device)
     with torch.no_grad():
-        out_norm = actor(z_t).detach().cpu().numpy().reshape(-1)
-    out_phys = normalizer.denormalize(out_norm)
+        out_phys = actor(z_t).detach().cpu().numpy().reshape(-1)
+    out_norm = normalizer.normalize(out_phys.astype(np.float32))
 
     rounded = np.unique(np.round(out_norm, 6))
     pair_in = _pairwise_l2(z, num_pairs=2000, seed=seed)
@@ -311,7 +311,7 @@ def _gradient_report(
             p.grad = None
 
     emb = batch["embedding"].to(device)
-    target = batch["command_norm"].to(device)
+    target = batch["command"].to(device)
     pred = actor(emb)
     criterion = nn.MSELoss()
     loss = criterion(pred, target)
@@ -500,18 +500,13 @@ def main() -> None:
     device = select_device(args.device)
     print(describe_device(device))
 
-    jepa_ckpt = resolve_run_checkpoint(
-        runs_root,
-        jepa_run_dirname(config),
-        explicit=Path(args.jepa_checkpoint) if args.jepa_checkpoint else None,
-        seed=args.seed,
-    )
     actor_ckpt = resolve_run_checkpoint(
         runs_root,
         actor_run_dirname(config),
         explicit=Path(args.actor_checkpoint) if args.actor_checkpoint else None,
         seed=args.seed,
     )
+    jepa_ckpt = resolve_jepa_checkpoint_from_actor(actor_ckpt, project_dir=root)
 
     jepa_payload = torch.load(jepa_ckpt, map_location=device, weights_only=False)
     actor_payload = torch.load(actor_ckpt, map_location=device, weights_only=False)
@@ -545,7 +540,7 @@ def main() -> None:
     all_train_phys = cmd_phys_train
 
     val_fraction = float(config["semantic_actor"]["early_stopping"].get("val_fraction", 0.2))
-    train_ds, val_ds = _split_train_val_actor(train_full, val_fraction)
+    train_ds, val_ds = split_train_val_actor(train_full, val_fraction)
     batch_size = int(config["semantic_actor"]["optimizer"]["batch_size"])
     g = torch.Generator()
     g.manual_seed(args.seed)

@@ -1,5 +1,5 @@
 """
-Plan §11 TS-JEPA cosine alignment loss.
+Plan §10 TS-JEPA cosine alignment loss.
 
 Paper objective (per horizon step j):
 
@@ -8,7 +8,7 @@ Paper objective (per horizon step j):
     L_JEPA = -(1/K_p) Σ_{j=1}^{K_p} cos_sim(z̃_j, z̄_j)
 
 Target embeddings z̄_j come from the EMA target encoder with stop-gradient
-(see `TSJEPA.encode_targets` and plan §7).
+(see `TSJEPA.encode_targets` and plan §8).
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def jepa_cosine_similarity(pred: torch.Tensor, target: torch.Tensor) -> torch.Te
 
 def jepa_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """
-    Plan §11 JEPA loss L_JEPA = -mean_{b,j}(cos_sim(z̃_{b,j}, z̄_{b,j})).
+    Plan §10 JEPA loss L_JEPA = -mean_{b,j}(cos_sim(z̃_{b,j}, z̄_{b,j})).
 
     Equivalent to: mean over batch of -(1/Kp) Σ_j cos_sim for fixed Kp.
     Minimizing this loss maximizes cosine alignment.

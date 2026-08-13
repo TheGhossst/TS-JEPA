@@ -16,10 +16,10 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from ts_jepa.config import actor_run_dirname, jepa_run_dirname, load_config, project_root
+from ts_jepa.config import actor_run_dirname, load_config, project_root
 from ts_jepa.data.datasets import ActorEmbeddingDataset, load_command_normalizer
 from ts_jepa.device import describe_device, select_device
-from ts_jepa.evaluation.checkpoints import resolve_run_checkpoint
+from ts_jepa.evaluation.checkpoints import resolve_jepa_checkpoint_from_actor, resolve_run_checkpoint
 from ts_jepa.models.actor import SemanticActor
 from ts_jepa.models.ts_jepa import TSJEPA
 
@@ -58,18 +58,13 @@ def main() -> None:
     device = select_device(args.device)
     print(describe_device(device))
 
-    jepa_ckpt = resolve_run_checkpoint(
-        runs_root,
-        jepa_run_dirname(config),
-        explicit=Path(args.jepa_checkpoint) if args.jepa_checkpoint else None,
-        seed=args.seed,
-    )
     actor_ckpt = resolve_run_checkpoint(
         runs_root,
         actor_run_dirname(config),
         explicit=Path(args.actor_checkpoint) if args.actor_checkpoint else None,
         seed=args.seed,
     )
+    jepa_ckpt = resolve_jepa_checkpoint_from_actor(actor_ckpt, project_dir=root)
 
     jepa_payload = torch.load(jepa_ckpt, map_location="cpu", weights_only=False)
     actor_payload = torch.load(actor_ckpt, map_location="cpu", weights_only=False)
@@ -98,19 +93,19 @@ def main() -> None:
     )
     loader = DataLoader(test_ds, batch_size=64, shuffle=False)
 
-    preds_norm = []
-    tgts_norm = []
+    preds_phys = []
+    tgts_phys = []
     with torch.no_grad():
         for batch in loader:
             emb = batch["embedding"].to(device)
             pred = actor(emb).reshape(-1).cpu().numpy()
-            tgt = batch["command_norm"].reshape(-1).cpu().numpy()
-            preds_norm.append(pred)
-            tgts_norm.append(tgt)
-    preds_norm = np.concatenate(preds_norm)
-    tgts_norm = np.concatenate(tgts_norm)
-    preds_phys = normalizer.denormalize(preds_norm)
-    tgts_phys = normalizer.denormalize(tgts_norm)
+            tgt = batch["command"].reshape(-1).cpu().numpy()
+            preds_phys.append(pred)
+            tgts_phys.append(tgt)
+    preds_phys = np.concatenate(preds_phys)
+    tgts_phys = np.concatenate(tgts_phys)
+    preds_norm = normalizer.normalize(preds_phys.astype(np.float32))
+    tgts_norm = normalizer.normalize(tgts_phys.astype(np.float32))
 
     metrics = actor_payload.get("test_loss")
     if metrics is None and "val_loss" in actor_payload:

@@ -1,24 +1,27 @@
 # Implementation Choices
 
 This file documents every detail required to run the baseline that is **not**
-explicitly paper-specified in `docs/TS-JEPA_Paper-Faithful_Final.md`.
+explicitly paper-specified in `docs/plan.md`.
 
 Do not treat these as paper facts.
 
 ## Environment (plan §3)
 
 Aligned with `docs/plan.md` §3; verified by `assert_plan_environment_config()` and
-`validate_plan_environment()` (plan §3.3 gate before dataset generation / training).
+`validate_plan_environment()` (gate before dataset generation / training).
 
 | Item | Value |
 |------|-------|
-| Backend | Custom `InvertedCartPoleEnv` — **not** Gym CartPole-v1 |
-| Observation | RGB frames (not raw 4D state to the encoder) |
-| Render resolution | `64 × 128 × 3` |
-| κ context | `2` frames → `[6, 64, 128]` via `channel_concat` |
-| Control | scalar `u ∈ [-20, +20]` N |
-| Sampling period τ_o | `1` ms (`dt = 0.001` s) |
-| §3.3 validation | force limits, integration, pendulum dynamics, cart tracking, RGB render, stability, state/render consistency |
+| Backend | Custom `InvertedCartPoleEnv` (Gym vs custom is NOT SPECIFIED) |
+| Observation | RGB frames (paper-specified) |
+| Native render | `128 × 256 × 3` (IC; paper only specifies resize **to** 64×128) |
+| Encoder input | `64 × 128 × 3` after 5×5 Gaussian-kernel resample (Algorithm 1) |
+| κ context packing | supervised/AE only: `channel_concat` → `[3κ, 64, 128]` |
+| Control | scalar `u ∈ [-20, +20]` N (paper-specified) |
+| Sampling period τ_o | `1` ms (`dt = 0.001` s), 100 stored steps (paper-specified) |
+| Dataset observation stride | `1` physics step per stored sample (paper setup; Fig. 4 does not change τ_o) |
+| Appearance | per-trajectory cart/pole palette (IC; Fig. 5(c) is illustration, not a required sampler) |
+| Environment validation | force limits, integration, pendulum dynamics, cart tracking, RGB render, stability, state/render consistency |
 
 ## Environment / physics
 
@@ -32,7 +35,39 @@ Aligned with `docs/plan.md` §3; verified by `assert_plan_environment_config()` 
 | Integrator | semi-implicit Euler | unspecified by paper |
 | Process noise `N_s` | `0` (std=`0.0`) | paper leaves cart-pole `N_s` unspecified; deterministic baseline |
 | Desired state | `[0,0,0,0]` | upright at origin |
-| Raw render size | `64 × 128` | plan §3.1 target rendering resolution |
+| Raw render size | `128 × 256` | IC camera; paper resize destination is 64×128 |
+| Renderer | coverage anti-aliased float rasterizer | paper-silent; integer PIL made 1 ms motion invisible |
+| Dataset stride | 1 physics tick / stored frame | paper τ_o = 1 ms, 100 steps; Fig. 4 is analysis only |
+
+## Datasets D_s / D_a (plan §4)
+
+Paper specifies counts (200/40 and 100/20) and that D_a embeddings are formed **after** TS-JEPA using Ψθ. Whether the underlying RGB rollouts are shared is **NOT SPECIFIED**.
+
+| Choice | Value | Notes |
+|--------|-------|-------|
+| Physical rollouts | disjoint `trajectory_index` / seed | D_s: 0–239; D_a: 240–359. Actor test is not a subset of JEPA train |
+| Native stored RGB | `128 × 256 × 3` | IC camera; encoder input is 64×128 after Gaussian resize |
+| Stale `data_dp_fixed/` | regenerate | older files stored at 64×128 with overlapping D_s/D_a indices will fail sanity |
+
+## Fig. 4 sampling-rate MAPE (plan §15)
+
+Fig. 4 compares consecutive-frame MAPE (Eq. 26) at different sampling rates, with and without augmentation. The rate axis is **NOT SPECIFIED**. Main simulation τ_o stays 1 ms.
+
+| Choice | Value |
+|--------|-------|
+| Rate grid | `{1, 2, 5, 10}` ms (`experiments.fig4_sampling_interval_ms`) |
+| How | integer subsample of stored 1 ms frames |
+| With augmentation | color jitter + color drop on RGB (no ImageNet normalize / resize) |
+| CLI | `python scripts/pipeline/eval_runtime.py --mode fig4` (no checkpoints) |
+
+## Actor mean-command baseline (diagnostic)
+
+Not a paper metric. Actor training and `evaluate_actor_nmae` record MSE/NMAE of predicting the training-set mean command so a collapsed actor is visible. This does **not** fail `assert_plan_*`.
+
+## LoS probability (Eq. 5)
+
+Paper typesets a product of fractions that drives P_LoS → 0 at Table IV geometry. This repo uses the cited InF-SH / 3GPP form with the height ratio **inside** k (see `WirelessChannelModel.los_probability`). That reading is an implementation reconciliation, not a recovered paper number.
+
 
 ## DP teacher
 
@@ -40,35 +75,35 @@ Aligned with `docs/plan.md` §3; verified by `assert_plan_environment_config()` 
 |--------|-------|-------|
 | Method | discretized discounted value iteration + local action refinement | paper requires nonlinear DP; grids/`R` unspecified |
 | Dataset control source | `dp_nonlinear` (recorded in each `.npz`) | plan §4.1 — **not** `Uniform(-20, 20)` |
-| Post-generation verification | `verify_not_uniform_random_actions()` | lag-1 autocorr + histogram structure vs uniform-iid reference |
+| Post-generation verification | `verify_not_uniform_random_actions()` | peaked histogram **or** lag-1 autocorr vs uniform-iid (1 ms DP may lack persistence) |
 | Physics `dt` | `0.001` s | matches simulation sampling |
-| DP substeps `N` | `50` | one Bellman transition = **0.05 s** held force |
-| Stage cost | `Σ_{j=1..N} ½‖s_j−s★‖² + ½ R u²` | integrated state cost; control charged **once** per DP decision |
+| DP substeps `N` | `1` | PAPER-IMPLIED: one Bellman transition = one \(\tau_o\) (Eq. 2 subject to Eq. 1). Not an IC. |
+| Stage cost | `½‖s_{k+1}−s★‖² + ½ R u²` | one-step state cost; control charged **once** per DP decision |
 | Control effort weight `R` | `0.001` | scalar stand-in for positive-definite `R` |
 | Init state noise | `±0.35` (±0.175 on θ) | IC — wide enough to leave π≈0 deadzone under Ns=0 |
 | Discount | `0.99` | unspecified |
 | Value-iteration iters | `50` | unspecified |
 | Force bins | `11` in `[-20,20]` | unspecified discretization |
 | State grids | `x×13`, `ẋ×11`, `θ×13`, `θ̇×11` (see YAML) | unspecified |
-| `act()` | same N-step Bellman cost as VI | local discrete re-opt over table ± neighbors |
+| `act()` | same one-step Bellman cost as VI | local discrete re-opt over table ± neighbors |
 
 ## Input tensor construction
 
-Aligned with `docs/plan.md` §8; verified by `assert_plan_temporal_config()`.
+Aligned with `docs/plan.md` §6; verified by `assert_plan_temporal_config()`.
 
 | Choice | Value |
 |--------|-------|
-| κ | `2` consecutive context frames |
+| κ | `2` consecutive frames for **supervised/AE**; TS-JEPA uses current frame only |
 | Kp | `15` prediction horizon |
 | Embedding dim | `256` |
-| Context at step k | κ frames ending at k → `[x_k-1, x_k]` |
+| Context at step k | `x_k` (one RGB frame, Algorithm 1) |
 | Control sequence | `[u_k, ..., u_{k+Kp-1}]` (teacher DP commands) |
-| Target inputs | κ-windows ending at `k+1 .. k+Kp` |
+| Target inputs | `x_{k+1} .. x_{k+Kp}` (one RGB frame each) |
 | Predictor outputs | `[z̃_{k+1}, ..., z̃_{k+Kp}]` autoregressively |
 
-## JEPA loss (plan §11)
+## JEPA loss (plan §10)
 
-Aligned with `docs/plan.md` §11; verified by `assert_plan_jepa_loss_config()`.
+Aligned with `docs/plan.md` §10; verified by `assert_plan_jepa_loss_config()`.
 
 | Item | Value |
 |------|-------|
@@ -79,14 +114,14 @@ Aligned with `docs/plan.md` §11; verified by `assert_plan_jepa_loss_config()`.
 | Equivalent minimizing form | `cosine_alignment_loss()` = `1 - mean(cos_sim)` (same gradients) |
 | Targets | EMA target encoder, stop-gradient (`encode_targets`) |
 
-## JEPA training hyperparameters (plan §12)
+## JEPA training hyperparameters (plan §11)
 
-Aligned with `docs/plan.md` §12; verified by `assert_plan_jepa_training_config()`
+Aligned with `docs/plan.md` §11; verified by `assert_plan_jepa_training_config()`
 in baseline entry scripts (not inside the train loop — smoke tests may shrink batch/Kp).
 
 | Parameter | Value |
 |-----------|-------|
-| Optimizer | SGD (momentum 0) |
+| Optimizer | SGD | Table II; momentum `0.0` is IC (not a paper number) |
 | Learning rate | `0.2` |
 | Batch size | `256` (effective; microbatch accumulation is IC) |
 | Epochs | `150` |
@@ -96,9 +131,9 @@ in baseline entry scripts (not inside the train loop — smoke tests may shrink 
 | Kp / κ / emb | `15` / `2` / `256` |
 | Forbidden | Adam, LR=`0.001`, EMA=`0.996`, wd=`1e-5`, epochs=`200` |
 
-## JEPA training procedure (plan §13)
+## JEPA training procedure (plan §10 Algorithm 1)
 
-Aligned with `docs/plan.md` §13; implemented by `jepa_forward_batch()` +
+Aligned with `docs/plan.md` §10; implemented by `jepa_forward_batch()` +
 `jepa_sgd_and_ema_step()`; verified by `assert_plan_jepa_procedure_config()`.
 
 | Step | Action |
@@ -112,29 +147,32 @@ Aligned with `docs/plan.md` §13; implemented by `jepa_forward_batch()` +
 
 ## Encoder ResNet low-level structure
 
-Aligned with `docs/plan.md` §6–§7; verified by `assert_plan_encoder_config()`.
+Paper-specified (plan §7–§8): widths 64→128→256 with BN+ReLU; target = copy, stop-grad, EMA η=0.99.
+
+Everything below is IC (plan §7: do not label stem / MaxPool / GAP / 4×8 as paper architecture).
 
 | Component | Value |
 |-----------|-------|
 | Context encoder Ψθ | `ContextEncoder` |
 | Target encoder Ψθ̄ | same class (`TargetEncoder = ContextEncoder`), init `θ̄ ← θ` |
-| Channel widths | 64 → 128 → 256 |
-| Embedding dim | 256 |
-| Stem | `7×7` conv stride-2 → BN → ReLU → MaxPool3×3 stride-2 |
-| Stage 64 | residual, stride 1 |
-| Stage 128 | residual, stride 2 |
-| Stage 256 | residual, stride 2 |
-| Head | global average pool → linear |
-| Blocks per stage | `2` (plan §26.2 VERIFY) |
-| Target trainable | `false` — frozen, stop-gradient forward |
-| Target update | EMA `θ̄ ← η θ̄ + (1-η) θ`, η=0.99 |
-| BN running-stat buffers | copied from online each EMA step (IC) |
+| Channel widths | 64 → 128 → 256 (paper) |
+| Embedding dim | 256 (paper-implied from predictor output; Fig. 7 also lists 64/128/350) |
+| Stem | `7×7` conv stride-2 → BN → ReLU → MaxPool3×3 stride-2 (IC) |
+| Stage 64 | residual, stride 1 (IC) |
+| Stage 128 | residual, stride 2 (IC) |
+| Stage 256 | residual, stride 2 (IC) |
+| Head | spatial pool `4×8` → flatten → linear (IC; not GAP) |
+| Blocks per stage | `2` (IC) |
+| Target trainable | `false` — frozen, stop-gradient forward (paper) |
+| Target update | EMA `θ̄ ← η θ̄ + (1-η) θ`, η=0.99 (paper) |
+| BN running-stat buffers | same EMA as θ (float buffers); integer buffers copied |
 
-## Predictor §10 command-resolution (OPEN)
+## Predictor command source (plan §9, OPEN)
 
-Plan §10 / §26.1: paper uses ũ notation during predictor training, but the
-pretraining command-generation mechanism is **not fully specified**. Status remains
-`OPEN` / `PENDING_PAPER_IMPLEMENTATION_RESOLUTION`.
+Plan §9: paper uses ũ notation during predictor training, but the
+pretraining command-generation mechanism is **not specified**. Status remains
+`OPEN`. The baseline keeps `teacher_dp` as a documented candidate and does
+**not** invent a paper-exact mechanism.
 
 | Item | Value |
 |------|-------|
@@ -151,12 +189,14 @@ JEPA checkpoints, `repetition_summary.json`, eval reports.
 
 ## Predictor architecture (plan §9)
 
-Aligned with `docs/plan.md` §9; verified by `assert_plan_predictor_config()`.
+Paper-specified: MLP hidden **1024**, output **256**, autoregressive, command-conditioned. No virtual-channel inputs.
+
+Hidden ReLU, concat, and input width 257 are IC.
 
 | Component | Value |
 |-----------|-------|
 | Type | MLP |
-| Stack | `Linear(257→1024) → ReLU → Linear(1024→256)` |
+| Stack | `Linear(257→1024) → ReLU → Linear(1024→256)` (ReLU and concat fusion are IC) |
 | Autoregressive | `z_{j+1} = Pφ(concat(z_j, u_j))` |
 | Inputs | embedding + scalar control only |
 | Forbidden | virtual inputs / channel variables / channel embeddings |
@@ -167,16 +207,29 @@ Aligned with `docs/plan.md` §5; verified by `assert_plan_preprocessing_config()
 
 | Split | Order |
 |-------|-------|
-| Train (plan §5.1) | augmentation (color jitter → color drop) → ImageNet normalize → formatting (Gaussian blur → resize to 64×128) |
-| Eval (plan §5.2) | resize → ImageNet normalize (no stochastic aug, no blur) |
-| Commands (plan §5.3) | z-score on JEPA train commands: `u_norm = (u - μ) / σ`; denorm `u = u_norm * σ + μ` |
+| Train | jitter (random op order) → color drop → ImageNet normalize → 5×5 Gaussian-kernel resample to 64×128 (σ ~ U[0.1, 0.2]) |
+| Eval | ImageNet normalize → 5×5 Gaussian-kernel resample to 64×128 (σ = 0.15 midpoint); no stochastic aug |
+| Commands | z-score on JEPA train commands for **Pφ** only: `u_norm = (u - μ) / σ` |
 
 ## Semantic actor output
 
 | Choice | Value |
 |--------|-------|
-| Network output | linear (normalized command domain) |
-| Runtime | `u = u_norm * σ + μ`, then clip to `[-20, +20]` N |
+| Network output | linear, **physical Newtons** (Eq. 15) |
+| Runtime | clip to `[-20, +20]` N; z-score that force only when feeding Pφ |
+
+## Inference / evaluation (plan §14–§15)
+
+| Choice | Value | Notes |
+|--------|-------|-------|
+| First lost packet before any embedding | command `0.0` N | paper does not specify the empty-latent case |
+| Plant force clip | `[u_min, u_max]` after denorm | env also clips; not an actor nonlinearity |
+| MAPE zero denominator (Eq. 26) | skip pixels with \(x_{k-1}(υ)=0\) | paper silent |
+| Embedding bit-width | 8 bits/value | recovered from the paper’s **98.95%** reduction (`64×128×3×8` vs `256×8`); not an invented `256×32` |
+| t-SNE perplexity / sample cap | sklearn default-style perplexity; `tsne_max_samples=500` | visualization only |
+| Synthetic packet-loss mask (stability) | warm-up then alternate receive/loss | paper does not specify this diagnostic pattern |
+| `[0.74, 1.0]` control band | recorded, not a pass/fail gate | plan: scalability plots only |
+| `--jepa-checkpoint` | honored when passed; else actor-metadata path | CLI convenience |
 
 ## Training batching / GPU memory
 
@@ -200,7 +253,9 @@ Aligned with `docs/plan.md` §5; verified by `assert_plan_preprocessing_config()
 | `cudnn.benchmark` | on | fixed 64×128 shapes |
 | Checkpoint I/O | CPU `state_dict` + `cuda.synchronize` before `torch.save` | mitigates WDDM access-violation crashes mid-epoch |
 | Loss `.item()` | once per effective step | avoids forcing a GPU sync every microbatch |
-| Eval artifacts | `runs/eval/{baseline,nmae,closed_loop,embedding_tsne,baseline_validation}_*` + PNG plots | wireless only after baseline validation passes |
+| Eval artifacts | `runs/eval/{baseline,nmae,closed_loop,embedding_tsne,baseline_validation}_*` + PNG plots | wireless only after baseline validation `PASS` |
+| Prediction NMAE | `mean(\|u_pred-u_true\|)/40` after denorm | plan §15 Eq. (27); not `mean(\|err\|)/mean(\|u\|)` |
+| Wireless delivery | `packet_received = scheduled AND γ≥γ_th` | controller path; AoI follows α (plan §13 Eq. 17), not delivery |
 | Checkpoint resolve | `best.pt` else `seed_0/best.pt` | single-seed prelim vs 5-seed selected `best.pt` |
 | Experiment overlay | `configs/ts_jepa_dp_fixed.yaml` | `_base` merge; `data_dp_fixed` + `ts_jepa_dp_fixed` / `semantic_actor_dp_fixed` run dirs |
 
@@ -241,7 +296,10 @@ Algorithm 2 selects the **largest positive** indices. The code therefore uses
 and selects Top-J devices with `U_i > 0`. This preserves Algorithm 2’s selection
 rule while remaining consistent with the minimization in (24).
 
-### Still IMPLEMENTATION CHOICE (no numerical value in Final.md)
+Lyapunov \(B\) in eq. (22) is **omitted** (paper: does not affect performance).
+It is not an IC number to recover.
+
+### Still IMPLEMENTATION CHOICE (no numerical value in the paper)
 
 | Choice | Value |
 |--------|-------|
@@ -254,7 +312,24 @@ rule while remaining consistent with the minimization in (24).
 Hall size / room height / bandwidth are stored from Table IV; path-loss uses the
 paper distance/height/clutter formulas above (hall polygon layout not simulated).
 
-## Out of scope until baseline validated
+## Paper baselines / Figs. 6–11 (plan §16–§17)
+
+| Item | Paper | Implementation choice |
+|------|-------|------------------------|
+| DP on received observation | nonlinear DP | DP uses privileged **4D plant state** (cannot run on RGB) |
+| Supervised \(\kappa\in\{2,4\}\) | RGB → command | ResNet 64/128/256 + MLP 1024→256→1; AdamW lr \(10^{-3}\), batch 64, 50 epochs |
+| Generative AE \(\kappa=2\) | reconstruct state, then nonlinear control | same ResNet encoder; linear RGB decoder; **4D state head** + DP; recon weights 1.0/1.0 |
+| RR / opportunistic miss | hold last command | initial force `0.0` N before any delivery |
+| Fig. 6 miss fallbacks | 15-step case: conventional hold (plan: last command if unscheduled) | zero-action extra; not \(P_\varphi\) |
+| Fig. 4 sampling rates | experiment exists | `{1,2,5,10}` ms subsample of stored τ_o=1 ms frames |
+| Fig. 7 embedding dims | experiment exists | `{64,128,256,350}` in YAML — **not** in plan.md |
+| Fig. 8 train sizes | experiment exists | `{50,100,150,200}` of \(D_s\) |
+| Fig. 9 SNR | `{5,10,20}` dB | **eval-time** SNR; training-time dropout not specified |
+| Fig. 10 device counts \(I\) | scalability vs RR/opp | `{2,4,8,16,32}`; \(J\) stays IC |
+| Fig. 11 extra packet loss | “including packet loss” | Bernoulli `{0,0.1,0.2,0.3}` after a successful scheduled slot; hold on outage is IC |
+| Acceptable score band | `[0.74, 1.0]` (plan §15 plots) | used only to count supported devices in Figs. 10–11 |
+
+## Out of scope
 
 - GE-JEPA
 - Gilbert-Elliott masking

@@ -5,6 +5,7 @@ from ts_jepa.data.temporal import (
     context_frame_indices,
     describe_temporal_sample,
     max_valid_time_index,
+    predicted_command_indices,
     target_end_indices,
 )
 from ts_jepa.plan.temporal import PLAN_TEMPORAL, assert_plan_temporal_config
@@ -16,5 +17,6 @@ __all__ = [
     "context_frame_indices",
     "describe_temporal_sample",
     "max_valid_time_index",
+    "predicted_command_indices",
     "target_end_indices",
 ]

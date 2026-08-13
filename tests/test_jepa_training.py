@@ -1,4 +1,4 @@
-"""Plan §12 JEPA training hyperparameter tests."""
+"""Plan §11 JEPA training hyperparameter tests."""
 
 from __future__ import annotations
 
@@ -31,6 +31,9 @@ def test_plan_jepa_training_config_matches_baseline_yaml():
     assert config["ts_jepa"]["lr_decay"]["factor"] == PLAN_JEPA_TRAINING["lr_decay_factor"]
     assert config["ts_jepa"]["lr_decay"]["interval_epochs"] == PLAN_JEPA_TRAINING["lr_decay_interval_epochs"]
     assert config["ts_jepa"]["target_encoder"]["ema_decay"] == PLAN_JEPA_TRAINING["ema_decay"]
+    assert config["ts_jepa"]["early_stopping"]["enabled"] is True
+    assert config["evaluation"]["repetitions"] == PLAN_JEPA_TRAINING["repetitions"]
+    assert config["evaluation"]["reported_result"] == PLAN_JEPA_TRAINING["reported_result"]
     assert config["input"]["kappa"] == PLAN_JEPA_TRAINING["kappa"]
     assert config["ts_jepa"]["prediction_horizon"]["Kp"] == PLAN_JEPA_TRAINING["Kp"]
     assert config["ts_jepa"]["encoder"]["embedding_dim"] == PLAN_JEPA_TRAINING["embedding_dim"]
@@ -52,7 +55,7 @@ def test_build_jepa_optimizer_is_sgd_with_plan_hparams():
 
 
 def test_build_jepa_optimizer_allows_smoke_batch_override():
-    """Smoke tests shrink batch_size; optimizer build must not hard-assert §12."""
+    """Smoke tests shrink batch_size; optimizer build must not hard-assert §11."""
     config = copy.deepcopy(load_config())
     config["ts_jepa"]["optimizer"]["batch_size"] = 2
     config["ts_jepa"]["prediction_horizon"]["Kp"] = 5
@@ -70,7 +73,7 @@ def test_build_jepa_optimizer_rejects_adam():
         build_jepa_optimizer(model, config)
 
 
-def test_lr_schedule_matches_plan_section12():
+def test_lr_schedule_matches_plan_section11():
     config = load_config()
     base = float(config["ts_jepa"]["optimizer"]["learning_rate"])
     assert jepa_learning_rate_at_epoch(base, 0) == base
@@ -102,7 +105,7 @@ def test_apply_jepa_lr_decay_updates_optimizer():
 def test_plan_jepa_training_rejects_wrong_or_forbidden_defaults(field, value):
     config = copy.deepcopy(load_config())
     config["ts_jepa"]["optimizer"][field] = value
-    with pytest.raises(ValueError, match="Plan §12"):
+    with pytest.raises(ValueError, match="Plan §11"):
         assert_plan_jepa_training_config(config)
 
 
@@ -110,4 +113,18 @@ def test_plan_jepa_training_rejects_forbidden_ema_decay():
     config = copy.deepcopy(load_config())
     config["ts_jepa"]["target_encoder"]["ema_decay"] = 0.996
     with pytest.raises(ValueError, match="0.996|0.99"):
+        assert_plan_jepa_training_config(config)
+
+
+def test_plan_jepa_training_rejects_disabled_early_stopping():
+    config = copy.deepcopy(load_config())
+    config["ts_jepa"]["early_stopping"]["enabled"] = False
+    with pytest.raises(ValueError, match="early_stopping"):
+        assert_plan_jepa_training_config(config)
+
+
+def test_plan_jepa_training_rejects_wrong_repetition_count():
+    config = copy.deepcopy(load_config())
+    config["evaluation"]["repetitions"] = 1
+    with pytest.raises(ValueError, match="repetitions"):
         assert_plan_jepa_training_config(config)
