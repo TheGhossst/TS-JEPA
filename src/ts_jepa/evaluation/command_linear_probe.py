@@ -24,6 +24,24 @@ from ts_jepa.models.ts_jepa import TSJEPA
 from ts_jepa.preprocessing.command_stats import CommandNormalizer
 from ts_jepa.training.actor_helpers import split_train_val_actor
 
+# #region agent log
+def _agent_dbg(hypothesis_id: str, location: str, message: str, data: dict[str, Any], run_id: str = "pre-fix") -> None:
+    import json as _json
+    import time
+
+    payload = {
+        "sessionId": "1367dc",
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    with open(r"c:\code\TS-JEPA\debug-1367dc.log", "a", encoding="utf-8") as handle:
+        handle.write(_json.dumps(payload) + "\n")
+# #endregion
+
 
 PEARSON_GOOD = 0.20
 PEARSON_POOR = 0.05
@@ -560,6 +578,61 @@ def run_command_recoverability_probe(
         state_linear=state_ols["test"],
         state_mlp=state_mlp,
     )
+
+    # #region agent log
+    z_std = float(train_arrays["z"].std())
+    z_rank = None
+    try:
+        zc = train_arrays["z"].astype(np.float64)
+        zc = zc - zc.mean(axis=0, keepdims=True)
+        s = np.linalg.svd(zc, compute_uv=False)
+        p = (s ** 2) / max(float((s ** 2).sum()), 1e-12)
+        z_rank = float(1.0 / np.sum(p ** 2))
+        top1 = float(p[0])
+    except Exception:
+        top1 = float("nan")
+    cmd_zero = float(np.mean(np.abs(train_arrays["command_phys"]) <= 1e-6))
+    _agent_dbg(
+        "H2",
+        "command_linear_probe.py:jepa_ols",
+        "frozen JEPA linear probe vs mean baseline",
+        {
+            "jepa_ols_pearson": jepa_ols["test"]["pearson_physical"],
+            "jepa_ols_nmae": jepa_ols["test"]["nmae_physical"],
+            "jepa_ols_rel_mse": jepa_ols["test"].get("relative_mse_improvement_vs_mean"),
+            "jepa_ols_pred_std": jepa_ols["test"]["pred_phys_std_N"],
+            "mean_baseline_nmae": mean_baseline_test["nmae_physical"],
+            "z_train_global_std": z_std,
+            "z_train_effective_rank": z_rank,
+            "z_train_top1_var_frac": top1,
+        },
+    )
+    _agent_dbg(
+        "H4",
+        "command_linear_probe.py:state_ols",
+        "raw-state linear probe vs mean baseline",
+        {
+            "state_ols_pearson": state_ols["test"]["pearson_physical"],
+            "state_ols_nmae": state_ols["test"]["nmae_physical"],
+            "state_ols_rel_mse": state_ols["test"].get("relative_mse_improvement_vs_mean"),
+            "state_ols_pred_std": state_ols["test"]["pred_phys_std_N"],
+            "train_command_zero_fraction": cmd_zero,
+            "target_phys_std": jepa_ols["test"]["target_phys_std_N"],
+        },
+    )
+    _agent_dbg(
+        "H2",
+        "command_linear_probe.py:interpretation",
+        "recoverability fork",
+        {
+            "code": interpretation["code"],
+            "jepa_linear_quality": interpretation["jepa_linear_quality"],
+            "state_linear_quality": interpretation["state_linear_quality"],
+            "jepa_mlp_quality": interpretation["jepa_mlp_quality"],
+            "state_mlp_quality": interpretation["state_mlp_quality"],
+        },
+    )
+    # #endregion
 
     return {
         "jepa_checkpoint": str(jepa_ckpt),

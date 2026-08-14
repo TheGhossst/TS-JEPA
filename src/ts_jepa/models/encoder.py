@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class ResidualBlock(nn.Module):
@@ -80,6 +81,8 @@ class ContextEncoder(nn.Module):
         self.global_pool = nn.AdaptiveAvgPool2d(tuple(self.spatial_pool_hw))
         pooled_dim = self.widths[-1] * self.spatial_pool_hw[0] * self.spatial_pool_hw[1]
         self.projection = nn.Linear(pooled_dim, self.embedding_dim)
+        # IC: Eq. (13) is cosine (direction-only). Unbounded embeddings + SGD 0.2
+        # make 15-step AR prediction oscillate; unit-sphere z is not paper architecture.
 
     def _make_stage(self, in_channels: int, out_channels: int, stride: int) -> nn.Sequential:
         blocks = [ResidualBlock(in_channels, out_channels, stride=stride)]
@@ -93,7 +96,7 @@ class ContextEncoder(nn.Module):
         x = self.stage128(x)
         x = self.stage256(x)
         x = self.global_pool(x).flatten(1)
-        return self.projection(x)
+        return F.normalize(self.projection(x), dim=-1, eps=1e-8)
 
     def architecture_summary(self) -> dict[str, object]:
         return {
@@ -103,8 +106,9 @@ class ContextEncoder(nn.Module):
             "blocks_per_stage": self.blocks_per_stage,
             "stem": "Conv7x7s2-BN-ReLU-MaxPool3x3s2",
             "stages": ["64", "128@s2", "256@s2"],
-            "head": "SpatialPool-Flatten-Linear",
+            "head": "SpatialPool-Flatten-Linear-L2Norm",
             "spatial_pool_hw": list(self.spatial_pool_hw),
+            "l2_normalize": True,
         }
 
 

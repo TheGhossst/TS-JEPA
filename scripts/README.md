@@ -140,12 +140,25 @@ python scripts/pipeline/run_paper_experiments.py --config configs/ts_jepa_dp_fix
 
 | Script | Description |
 |--------|-------------|
+| `diagnose/trajectory_sanity_check.py` | Verify on-disk trajectory dataset (counts, frames, IDs, commands) |
 | `diagnose/diagnose_jepa_embeddings.py` | Embedding statistics and collision checks |
 | `diagnose/diagnose_jepa_raw_vs_embedding_collision.py` | Raw vs latent collision analysis |
 | `diagnose/diagnose_jepa_representation_pipeline.py` | Full representation pipeline audit |
 | `diagnose/diagnose_dp_teacher.py` | DP teacher control inspection |
 | `diagnose/diagnose_actor_training.py` | Actor training diagnostics |
 | `diagnose/diagnose_actor_predictions.py` | Actor prediction analysis |
+
+```powershell
+# 2. Verify dataset
+python scripts/diagnose/trajectory_sanity_check.py --config configs/ts_jepa_dp_fixed.yaml
+
+python scripts/diagnose/diagnose_jepa_embeddings.py --config configs/ts_jepa_dp_fixed.yaml --device cuda
+python scripts/diagnose/diagnose_jepa_raw_vs_embedding_collision.py --config configs/ts_jepa_dp_fixed.yaml --device cuda
+python scripts/diagnose/diagnose_jepa_representation_pipeline.py --config configs/ts_jepa_dp_fixed.yaml --device cuda
+python scripts/diagnose/diagnose_dp_teacher.py
+python scripts/diagnose/diagnose_actor_training.py --config configs/ts_jepa_dp_fixed.yaml --device cuda
+python scripts/diagnose/diagnose_actor_predictions.py --config configs/ts_jepa_dp_fixed.yaml --device cuda
+```
 
 ## Tools
 

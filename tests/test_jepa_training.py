@@ -44,14 +44,23 @@ def test_build_jepa_optimizer_is_sgd_with_plan_hparams():
     model = TSJEPA(config)
     optimizer = build_jepa_optimizer(model, config)
     assert isinstance(optimizer, torch.optim.SGD)
+    decay_groups = [g for g in optimizer.param_groups if g["weight_decay"] == 0.0004]
+    bn_groups = [g for g in optimizer.param_groups if g["weight_decay"] == 0.0]
+    assert len(decay_groups) == 1
+    assert len(bn_groups) == 1
     assert optimizer.param_groups[0]["lr"] == 0.2
-    assert optimizer.param_groups[0]["weight_decay"] == 0.0004
     assert optimizer.param_groups[0]["momentum"] == 0.0
     trainable = {id(p) for p in jepa_trainable_parameters(model)}
     opt_params = {id(p) for group in optimizer.param_groups for p in group["params"]}
     target_params = {id(p) for p in model.target_encoder.parameters()}
     assert opt_params == trainable
     assert trainable.isdisjoint(target_params)
+    bn_param_ids = set()
+    for module in model.context_encoder.modules():
+        if isinstance(module, torch.nn.BatchNorm2d):
+            bn_param_ids.update(id(p) for p in module.parameters(recurse=False))
+    opt_bn_ids = {id(p) for g in bn_groups for p in g["params"]}
+    assert bn_param_ids == opt_bn_ids
 
 
 def test_build_jepa_optimizer_allows_smoke_batch_override():

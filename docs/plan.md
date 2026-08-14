@@ -107,6 +107,24 @@ as Eq. (1), so one Bellman stage equals one \(\tau_o\) (1 ms in
 Section IV). Do not hold \(u\) for a longer inner horizon and call that
 the paper teacher.
 
+### Motivating facts (Section II.A, prose)
+
+**PAPER-SPECIFIED** — these are the paper's stated reasons the
+predictor/scheduler exist, not just implementation convenience:
+
+-   The remote controller has "substantially higher computational
+    resources than the device itself," which is why encoder inference
+    runs on-device but predictor/actor training and the DP teacher run
+    off-device. This is the stated justification for the device/cloud
+    split.
+-   "Since the device dynamics are inherently unstable, uplink
+    transmission failures prevent the application of appropriate
+    control commands, causing the state \(x_{i,k}\) to diverge to
+    infinity as \(k \to \infty\)." This is the paper's explicit
+    justification for why the predictor (Eq. 12) and scheduler exist
+    at all — packet loss without prediction is catastrophic, not just
+    degraded.
+
 ------------------------------------------------------------------------
 
 # 3. Simulation environment (inverted cart-pole)
@@ -280,6 +298,30 @@ implementation choice.
 
 ------------------------------------------------------------------------
 
+# 9a. Two-phase operation (training vs. inference)
+
+**PAPER-SPECIFIED** (end of Section III.A and end of Section III.B):
+
+TS-JEPA, and separately the semantic actor, each operate in two
+distinct phases:
+
+1.  Training phase: devices transmit their *high-dimensional* states
+    to the remote controller (raw frames, not embeddings) for
+    control-command computation while TS-JEPA / the actor is being
+    trained at the base station. The communication-cost reduction does
+    **not** apply during this phase — full-frame transmission is
+    assumed throughout training.
+2.  Inference phase: only after training completes is the context
+    encoder deployed on-device and the predictor/actor deployed at the
+    remote controller, at which point embeddings (not raw frames) are
+    transmitted.
+
+This means "communication efficiency" (Section IV.B.5, the 98.95%
+figure) is an **inference-time claim only**. Do not compute or report
+communication savings using training-time traffic.
+
+------------------------------------------------------------------------
+
 # 10. TS-JEPA loss and Algorithm 1
 
 **PAPER-SPECIFIED:** cosine similarity between predicted embeddings and
@@ -388,6 +430,38 @@ LoS probability (Eq. 5); NLoS uses Eqs. 6–7.
 
 SNR (Eq. 8); capacity \(R_{i,k} = W_i \log_2(1+\gamma_{i,k})\) (Eq. 9);
 outage (Eq. 10).
+
+### Control channels vs. data channels (Section II.B, prose)
+
+**PAPER-SPECIFIED:** data channels and control channels are distinct.
+The centralized scheduler issues scheduling grants over "error-free
+downlink control channels" that "operate without contention or
+collisions." Only the *data* channels (state/embedding/command
+traffic) are subject to the path-loss/fading/outage model in
+Eqs. (4)–(10). Do not apply outage probability to scheduling grants
+themselves.
+
+### NLoS path loss (Eq. 6–7)
+
+``` text
+PL^NLoS_dB = max(PL_dB, PL^LoS_dB)                         (6)
+
+PL_dB = 33.63 + 21.9 log10(D^3D_i) + 20 log10(W_c)         (7)
+```
+
+Shadow fading standard deviation: **4.0**.
+
+### Outage probability (Eq. 10)
+
+``` text
+ε_{i,k} = P(R_{i,k} < R̄)
+        = 1 − exp[ −10^(PL^NLoS_dB / 10) · (N_c / P_i) · (2^(R̄/W_i) − 1) ]
+```
+
+**NOT SPECIFIED:** numerical value of \(\bar R\) (the minimum required
+transmission rate threshold used in Eq. 10 / outage). This belongs
+alongside \(I, J, V, \beta_{th}, p_{max}\) in Section 18 as a value
+Algorithm-2-adjacent code needs but the paper never gives numerically.
 
 ### AoI (Eq. 17 / Algorithm 2)
 
@@ -533,6 +607,59 @@ These are paper results, not extra methods:
 -   Scalability vs round-robin / opportunistic (Figs. 10–11), including
     packet loss.
 
+### Fig. 6 baseline taxonomy (Section IV.D.3)
+
+**PAPER-SPECIFIED** — Fig. 6 runs **two separate comparisons** under
+one figure; its legend has variant names that must all be reproduced:
+
+Condition A — "No-Prediction" (fresh state/embedding received every
+time slot, tests encoding quality only, no predictor involved):
+
+``` text
+Optimal Control – No Prediction
+Supervised κ=2  – No Prediction
+Supervised κ=4  – No Prediction
+Auto-encoder κ=2 – No Prediction
+TS-JEPA κ=2      – No Prediction
+```
+
+Condition B — device transmits **only at the initial time slot**, then
+the controller must infer for the remaining horizon (tests predictive
+capability):
+
+``` text
+Optimal Control – Zero Actions
+Supervised κ=2  – Repeated Actions
+Supervised κ=4  – Repeated Actions
+Auto-encoder κ=2 – Repeated Actions
+TS-JEPA κ=2      – Prediction
+```
+
+"Repeated/Zero Actions" means those baselines hold the last-known or a
+zero command for the rest of the horizon since they have no predictive
+mechanism; only TS-JEPA performs genuine latent rollout via \(P_\phi\).
+
+### Fig. 9 SNR sweep affects training, not only inference (Section IV.D.6)
+
+**PAPER-SPECIFIED** (prose): the SNR sweep \(\gamma_{th} \in
+\{5,10,20\}\) dB affects TS-JEPA **training**, not just inference —
+"lower SNR values result in fewer successfully received samples during
+training, limiting the TS-JEPA model's ability to capture ...
+dynamics." I.e. for Fig. 9, the training set itself must be
+reduced/dropped according to channel outage at the given SNR before
+training TS-JEPA — this is not simply evaluating an SNR-agnostic
+trained model under different test-time channel conditions.
+
+### Figs. 10–11 dual backbone subplots
+
+**PAPER-SPECIFIED:** Figs. 10 and 11 each have two subplots — (a) the
+proposed TS-JEPA model, (b) the supervised learning model — with
+scheduling method (opportunistic / round-robin / channel-aware) as the
+grouped variable within each subplot, at SNR \(\in \{5,20\}\) dB
+(Fig. 10) or packet loss \(\in \{5,10,15\}\%\) (Fig. 11). The
+generative autoencoder and DP-optimal baselines are **not** part of
+these scalability figures.
+
 ------------------------------------------------------------------------
 
 # 18. Explicitly not specified (must not be labeled paper-exact)
@@ -574,8 +701,9 @@ one \(\tau_o\) (`dp_substeps=1` when `dt=τ_o`).
 
 **IC (this repo):** custom `InvertedCartPoleEnv`; \(M=1.0\) kg,
 \(m=0.1\) kg, \(l=0.5\) m, \(g=9.81\), track \(2.4\) m, semi-implicit
-Euler, \(N_s=0\); DP `R=0.001`, discount \(0.99\), 11 force bins,
-grids in `control_teacher.grid`. Method remains nonlinear DP (that
+Euler, \(N_s=0\); DP `R=0.001`, undiscounted finite horizon \(K=300\),
+11 force bins, nodal-Taylor continuation of \(V\), grids in
+`control_teacher.grid`. Method remains nonlinear DP (that
 method **is** paper-specified).
 
 ### Frame stacking (\(\kappa\))
@@ -595,7 +723,9 @@ Paper specifies widths **64, 128, 256**, BN, and ReLU.
 
 **IC (this repo):** `blocks_per_stage=2`; stem Conv \(7\times7\) stride 2
 → BN → ReLU → MaxPool \(3\times3\) stride 2; spatial pool `4×8` (not
-GAP) → flatten → linear. Do not call this stem/head paper architecture.
+GAP) → flatten → linear → L2-normalize. Do not call this stem/head
+paper architecture. L2-normalize is required for cosine Eq. (13) under
+Table II SGD \(0.2\) (unbounded embeddings make 15-step AR oscillate).
 
 ### Predicted commands \(\tilde u\) during JEPA pretraining
 
@@ -613,8 +743,12 @@ pretraining). Tests must reject `paper_exact: true`, not require it.
 
 Paper specifies MLP hidden **1024**, output **256**, command-conditioned.
 
-**IC (this repo):** `concat(z, u)` → `Linear(257, 1024)`. Config:
-`predictor.input_tensor_construction`.
+**IC (this repo):** `concat(z, u)` → `Linear(257, 1024)` → ReLU →
+`Linear(1024, 256)` → L2-normalize; next AR input is detached
+(`detach_autoregressive_state`). Config: `predictor.input_tensor_construction`.
+Eq. (12) is still unrolled. Eq. (13) is one-step cosine; full 15-step
+BPTT is not paper-specified. Exclude BatchNorm from SGD weight decay;
+clip grads at `1.0` (both IC).
 
 ### Actor output activation
 
@@ -648,15 +782,19 @@ bits per embedding value, because
 That recovery is an accounting hypothesis, not a paper-stated dtype.
 Constant names must not say the paper specified 8-bit embeddings.
 
-### Scheduler scalars \(I, J, V, \beta_{th}, p_{max}\)
+### Scheduler scalars \(I, J, V, \beta_{th}, p_{max}, \bar R\)
 
 **NOT SPECIFIED** in Table IV or the body. Algorithm 2 needs them to
-run.
+run. \(\bar R\) (the minimum required transmission rate threshold used
+in Eq. 10 / outage) belongs alongside \(I, J, V, \beta_{th}, p_{max}\)
+here — the paper never gives it numerically.
 
 **IC (this repo):** \(I=4\), \(J=2\), \(V=1.0\), \(\beta_{th}=5.0\),
 \(p_{max}=0.2\) W. Config keys: `num_devices`,
 `max_devices_scheduled_J`, `drift_plus_penalty_V`,
-`aoi_threshold_beta_th`, `p_max_watt`.
+`aoi_threshold_beta_th`, `p_max_watt`. **\(\bar R\): document whatever
+value is used, or flag it unset** (config key TBD — do not leave
+unlabeled).
 
 ### Lyapunov constant \(B\) (Eq. 22)
 
@@ -664,6 +802,14 @@ The paper **omits** \(B\) (“does not affect the system performance in
 Lyapunov optimization”). It is not a lookup value and must not be
 fitted or asserted as paper-exact. This repo omits \(B\) from the index
 (`lyapunov_B_omitted`).
+
+### Predictor stability analysis (future work)
+
+The paper's Conclusion states: "we plan to linearize the nonlinear
+TS-JEPA predictor to enable stability analysis within the latent
+space." This is explicitly stated **future work**, not a result in
+this paper. Do not implement predictor linearization or latent-space
+stability analysis and attribute it to this paper.
 
 ### Out of scope (not in this paper)
 

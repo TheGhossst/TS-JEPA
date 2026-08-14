@@ -60,7 +60,13 @@ def main() -> None:
             "control_cost_paper_status": (
                 "Paper is silent; current implementation uses one control-cost charge per DP decision."
             ),
-            "bellman": "Q(s,u)=stage(s,u)+gamma*V(quantize(s_N))",
+            "bellman": "Q(s,u)=stage(s,u)+gamma*(V(s_g)+gradV(s_g).(s_N-s_g))",
+            "value_interpolation": "nodal_taylor",
+            "value_interpolation_reason": (
+                "Nearest-neighbor collapses 1 ms successors into one cell. "
+                "Multilinear interpolation kinks at θ̇=0, so any 1 ms motion looks costly. "
+                "Nodal Taylor with central-difference ∇V recovers restoring Q at τ_o=1 ms."
+            ),
             "desired_state": teacher.desired_state.tolist(),
             "R": float(teacher.control_effort_weight),
             "gamma": float(teacher.discount),
@@ -154,12 +160,16 @@ def main() -> None:
         final, stage = teacher._rollout_constant_force(s, float(u))
         assert isinstance(stage, float)
         cell = teacher._index_of(np.asarray(final, dtype=np.float64))
-        v_cont = float(teacher.value[cell])
+        v_nn = float(teacher.value[cell])
+        v_cont = float(
+            teacher._interpolated_value(np.asarray(final, dtype=np.float64).reshape(1, 4), teacher.value)[0]
+        )
         q = float(stage + teacher.discount * v_cont)
         successor[str(float(u))] = {
             "final_s_N": [float(x) for x in np.asarray(final).reshape(4)],
             "quantized_cell": list(cell),
             "integrated_stage_cost": float(stage),
+            "continuation_value_nearest": v_nn,
             "continuation_value": v_cont,
             "bellman_Q": q,
         }
@@ -174,7 +184,20 @@ def main() -> None:
         "Q_min": float(min(q_list)),
         "Q_max": float(max(q_list)),
     }
-    pass_c = len(set(cells)) >= 2 and (max(v_list) - min(v_list)) > 0.0 and (max(q_list) - min(q_list)) > 0.0
+    # Cells may still coincide at 1 ms; distinguishability is interpolated V / Q.
+    control_only = [0.5 * teacher.control_effort_weight * (u * u) for u in probe_u]
+    q_minus_control = [q - c for q, c in zip(q_list, control_only)]
+    pass_c = bool(
+        (max(v_list) - min(v_list)) > 1e-12
+        and (max(q_minus_control) - min(q_minus_control)) > 1e-12
+        and (max(q_list) - min(q_list)) > 0.0
+    )
+    report["successor_diagnostics_at_+0.25"]["num_unique_nearest_cells"] = int(len(set(cells)))
+    report["successor_diagnostics_at_+0.25"]["continuation_is_interpolated"] = True
+    report["successor_diagnostics_at_+0.25"]["interpolation"] = "nodal_taylor"
+    report["successor_diagnostics_at_+0.25"]["q_minus_control_range"] = float(
+        max(q_minus_control) - min(q_minus_control)
+    )
 
     # ------------------------------------------------------------------ D
     act_consistency = {}
@@ -231,6 +254,21 @@ def main() -> None:
             "num_in_band": int(np.sum(scores)),
         }
 
+    def _closed_loop_from(state0: np.ndarray, steps: int = 100) -> dict[str, np.ndarray]:
+        state = np.asarray(state0, dtype=np.float64).reshape(4).copy()
+        env.state = state.copy()
+        commands = []
+        states_out = []
+        for _ in range(steps):
+            force = env.clip_force(float(teacher.act(state)))
+            commands.append(force)
+            states_out.append(state.copy())
+            state, _ = env.step(force)
+        return {
+            "commands": np.asarray(commands, dtype=np.float64),
+            "states": np.stack(states_out, axis=0),
+        }
+
     traj = env.rollout(teacher, steps=100, seed=10000)
     cmds = traj["commands"]
     states = traj["states"]
@@ -252,16 +290,12 @@ def main() -> None:
         "numerically_bounded": finite,
         "eq28": eq28,
     }
-    pass_e = bool(
-        float(cmds.std()) > 0.0
-        and not np.array_equal(np.unique(cmds), np.array([0.0]))
-        and finite
-    )
 
-    # Extra perturbed seeds (sanity only)
     pert = []
+    pert_cmds = []
     for seed in range(10000, 10010):
         tr = env.rollout(teacher, steps=100, seed=seed)
+        pert_cmds.append(tr["commands"])
         pert.append(
             {
                 "seed": seed,
@@ -279,6 +313,57 @@ def main() -> None:
         )
     report["perturbed_rollouts"] = pert
     report["perturbed_eq28_mean"] = float(np.mean([p["eq28_mean_control_score"] for p in pert]))
+    stacked = np.concatenate(pert_cmds)
+    frac_zero = float(np.mean(stacked == 0.0))
+    report["perturbed_command_distribution"] = {
+        "fraction_zero": frac_zero,
+        "unique": [float(u) for u in np.unique(stacked)],
+        "std": float(stacked.std()),
+        "mean_abs": float(np.mean(np.abs(stacked))),
+    }
+
+    rep_roll = {}
+    for name in ("+0.25", "-0.25", "+0.10", "-0.10"):
+        tr = _closed_loop_from(reps[name], steps=100)
+        first_u = float(tr["commands"][0])
+        theta0 = float(tr["states"][0, 2])
+        theta_n = float(tr["states"][-1, 2])
+        eq = _eq28_scores(tr["states"])
+        rep_roll[name] = {
+            "first_u": first_u,
+            "command_unique": [float(u) for u in np.unique(tr["commands"])],
+            "command_mean": float(tr["commands"].mean()),
+            "command_std": float(tr["commands"].std()),
+            "fraction_zero": float(np.mean(tr["commands"] == 0.0)),
+            "theta_before": theta0,
+            "theta_after": theta_n,
+            "abs_theta_reduced": bool(abs(theta_n) < abs(theta0) - 1e-6),
+            "max_abs_theta": float(np.max(np.abs(tr["states"][:, 2]))),
+            "max_abs_x": float(np.max(np.abs(tr["states"][:, 0]))),
+            "finite": bool(np.isfinite(tr["states"]).all() and np.isfinite(tr["commands"]).all()),
+            "eq28": eq,
+        }
+    report["representative_rollouts"] = rep_roll
+
+    mean_abs_th0 = float(np.mean([abs(p["theta_before"]) for p in pert]))
+    mean_abs_th1 = float(np.mean([abs(p["theta_after"]) for p in pert]))
+    report["perturbed_mean_abs_theta"] = {"before": mean_abs_th0, "after": mean_abs_th1}
+
+    pass_e = bool(
+        finite
+        and float(stacked.std()) > 0.0
+        and frac_zero < 0.85
+        and (stacked > 0).any()
+        and (stacked < 0).any()
+        and rep_roll["+0.25"]["first_u"] > 0.0
+        and rep_roll["-0.25"]["first_u"] < 0.0
+        and rep_roll["+0.10"]["first_u"] > 0.0
+        and rep_roll["-0.10"]["first_u"] < 0.0
+        and rep_roll["+0.25"]["abs_theta_reduced"]
+        and rep_roll["-0.25"]["abs_theta_reduced"]
+        and rep_roll["+0.25"]["finite"]
+        and mean_abs_th1 < mean_abs_th0
+    )
 
     report["pass"] = {
         "A_policy_diversity": pass_a,

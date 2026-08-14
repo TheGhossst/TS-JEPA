@@ -24,6 +24,23 @@ from ts_jepa.evaluation.checkpoints import resolve_run_checkpoint
 from ts_jepa.models.ts_jepa import TSJEPA
 from ts_jepa.preprocessing.pipeline import PreprocessPipeline
 
+# #region agent log
+def _agent_dbg(hypothesis_id: str, location: str, message: str, data: dict[str, Any], run_id: str = "pre-fix") -> None:
+    import time
+
+    payload = {
+        "sessionId": "1367dc",
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    with open(r"c:\code\TS-JEPA\debug-1367dc.log", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload) + "\n")
+# #endregion
+
 
 def _hash_bytes(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()[:12]
@@ -507,6 +524,34 @@ def main() -> None:
         "classification": "",
     }
     report["classification"] = _classify(report)
+
+    # #region agent log
+    _agent_dbg(
+        "H1",
+        "diagnose_jepa_representation_pipeline.py:classify",
+        "pipeline collapse classification",
+        {
+            "classification": report["classification"],
+            "mean_unique_raw": raw_summary["mean_unique_raw_frames_exact"],
+            "mean_num_frames": raw_summary["mean_num_frames"],
+            "mean_unique_contexts": ctx_summary["mean_unique_contexts_rounded_6dp"],
+            "mean_unique_z_ratio": collapse_summary["mean_unique_ratio"],
+            "min_unique_z_ratio": collapse_summary["min_unique_ratio"],
+            "mean_consecutive_z_l2": collapse_summary["mean_consecutive_embedding_l2"],
+            "mean_consecutive_pixel_diff": raw_summary["mean_consecutive_frame_difference"],
+        },
+    )
+    _agent_dbg(
+        "H5",
+        "diagnose_jepa_representation_pipeline.py:state_corr",
+        "embedding vs physical-state correlations including velocity",
+        {
+            "max_state_correlation": state_summary["max_state_correlation"],
+            "mean_state_correlation": state_summary["mean_state_correlation"],
+            "per_variable_mean_max_abs": state_summary["per_variable_mean_max_abs_correlation"],
+        },
+    )
+    # #endregion
 
     out = (
         Path(args.out)

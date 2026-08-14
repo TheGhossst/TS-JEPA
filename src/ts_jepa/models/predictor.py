@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class Predictor(nn.Module):
@@ -66,7 +67,8 @@ class Predictor(nn.Module):
         x = torch.cat([embedding, command_norm], dim=-1)
         if x.shape[-1] != self.input_dim:
             raise ValueError(f"predictor input dim must be {self.input_dim}, got {x.shape[-1]}")
-        return self.forward_mlp(x)
+        # IC: same unit-sphere geometry as Ψ (cosine Eq. 13). Not a paper layer.
+        return F.normalize(self.forward_mlp(x), dim=-1, eps=1e-8)
 
     def forward(
         self,
@@ -88,15 +90,20 @@ class Predictor(nn.Module):
         for j in range(kp):
             z_next = self.forward_step(z_current, commands_norm[:, j])
             preds.append(z_next)
-            z_current = z_next
+            # IC: Eq. (12) is still unrolled. Eq. (13) is one-step cosine; full
+            # 15-step BPTT through Pφ is not specified and oscillates under Table II
+            # SGD 0.2. Detach so Ψθ is trained on ẑ_{k+1} and Pφ on every horizon
+            # step without backprop-through-time.
+            z_current = z_next.detach()
         return torch.stack(preds, dim=1)
 
-    def architecture_summary(self) -> dict[str, int | str]:
+    def architecture_summary(self) -> dict[str, int | str | bool]:
         return {
             "input_dim": self.input_dim,
             "hidden_dim": self.hidden_dim,
             "output_dim": self.output_dim,
-            "stack": "Linear-1024-ReLU-Linear-256",
+            "stack": "Linear-1024-ReLU-Linear-256-L2Norm",
             "autoregressive": True,
+            "detach_autoregressive_state": True,
             "inputs": "concat(embedding, command)",
         }

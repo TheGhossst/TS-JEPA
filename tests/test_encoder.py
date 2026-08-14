@@ -35,7 +35,7 @@ def test_context_encoder_stem_and_stages():
     assert summary["widths"] == [64, 128, 256]
     assert summary["embedding_dim"] == 256
     assert summary["spatial_pool_hw"] == [4, 8]
-    assert summary["head"] == "SpatialPool-Flatten-Linear"
+    assert summary["head"] == "SpatialPool-Flatten-Linear-L2Norm"
     assert enc.global_pool.output_size == (4, 8)
 
 
@@ -61,6 +61,7 @@ def test_model_forward_shapes_and_loss():
     z_pred = model.predict(z, commands)
     loss = cosine_alignment_loss(z_pred, z_tgt)
     assert z.shape == (b, 256)
+    assert torch.allclose(z.norm(dim=-1), torch.ones(b), atol=1e-5)
     assert z_tgt.shape == (b, kp, 256)
     assert z_pred.shape == (b, kp, 256)
     assert torch.isfinite(loss)
@@ -76,6 +77,28 @@ def test_target_encoder_same_class_and_init():
     assert isinstance(target, TargetEncoder)
     assert_target_initialized_from_context(context, target)
     assert all(not p.requires_grad for p in target.parameters())
+
+
+def test_model_train_keeps_target_encoder_in_eval():
+    """Plan §8: target BN running stats must not update from a target forward."""
+    config = load_config()
+    model = TSJEPA(config)
+    model.train()
+    assert model.context_encoder.training
+    assert model.predictor.training
+    assert not model.target_encoder.training
+
+    before = {
+        name: buf.detach().clone()
+        for name, buf in model.target_encoder.named_buffers()
+        if buf.dtype.is_floating_point
+    }
+    future = torch.randn(2, int(config["ts_jepa"]["prediction_horizon"]["Kp"]), 3, 64, 128)
+    model.encode_targets(future)
+    for name, buf in model.target_encoder.named_buffers():
+        if buf.dtype.is_floating_point:
+            assert torch.equal(before[name], buf)
+    assert not model.target_encoder.training
 
 
 def test_target_encoder_no_grad_on_backward():

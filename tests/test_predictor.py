@@ -30,8 +30,9 @@ def test_predictor_mlp_layer_sizes():
     assert pred.fc_out.in_features == 1024
     assert pred.fc_out.out_features == 256
     summary = pred.architecture_summary()
-    assert summary["stack"] == "Linear-1024-ReLU-Linear-256"
+    assert summary["stack"] == "Linear-1024-ReLU-Linear-256-L2Norm"
     assert summary["autoregressive"] is True
+    assert summary["detach_autoregressive_state"] is True
 
 
 def test_predictor_rejects_non_plan_dims():
@@ -55,8 +56,9 @@ def test_predictor_autoregressive_loop_updates_state():
     for j in range(kp):
         z_next = pred.forward_step(z_current, commands[:, j])
         manual.append(z_next)
-        z_current = z_next
+        z_current = z_next.detach()
     assert torch.allclose(out, torch.stack(manual, dim=1), atol=1e-6)
+    assert torch.allclose(out.norm(dim=-1), torch.ones(b, kp), atol=1e-5)
 
 
 def test_predictor_input_is_embedding_plus_command_only():

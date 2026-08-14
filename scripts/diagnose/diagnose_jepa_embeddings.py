@@ -23,6 +23,23 @@ from ts_jepa.device import describe_device, select_device
 from ts_jepa.evaluation.checkpoints import resolve_run_checkpoint
 from ts_jepa.models.ts_jepa import TSJEPA
 
+# #region agent log
+def _agent_dbg(hypothesis_id: str, location: str, message: str, data: dict[str, Any], run_id: str = "pre-fix") -> None:
+    import time
+
+    payload = {
+        "sessionId": "1367dc",
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    with open(r"c:\code\TS-JEPA\debug-1367dc.log", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload) + "\n")
+# #endregion
+
 
 def _embedding_stats(z: np.ndarray, *, zero_std_tol: float = 1e-6) -> dict[str, Any]:
     """Global and per-dimension stats for embeddings [N, D]."""
@@ -208,6 +225,98 @@ def _input_sensitivity_samples(
     return out
 
 
+def _effective_rank(z: np.ndarray) -> dict[str, Any]:
+    """Covariance participation ratio; rank ~1 is directional collapse even if std>0."""
+    z = np.asarray(z, dtype=np.float64)
+    zc = z - z.mean(axis=0, keepdims=True)
+    singular = np.linalg.svd(zc, compute_uv=False)
+    energy = singular ** 2
+    total = float(energy.sum())
+    if total <= 1e-12:
+        return {
+            "effective_rank": 0.0,
+            "top1_var_frac": 1.0,
+            "top5_var_frac": 1.0,
+            "singular_top": 0.0,
+            "singular_median": 0.0,
+        }
+    p = energy / total
+    return {
+        "effective_rank": float(1.0 / np.sum(p ** 2)),
+        "top1_var_frac": float(p[0]),
+        "top5_var_frac": float(p[: min(5, p.size)].sum()),
+        "singular_top": float(singular[0]),
+        "singular_median": float(np.median(singular)),
+    }
+
+
+def _pairwise_cosine(z: np.ndarray, num_pairs: int, seed: int) -> dict[str, Any]:
+    z = np.asarray(z, dtype=np.float64)
+    n = z.shape[0]
+    if n < 2:
+        return {"num_pairs": 0, "mean": float("nan"), "median": float("nan")}
+    rng = np.random.default_rng(seed)
+    num_pairs = min(int(num_pairs), n * (n - 1) // 2)
+    i_idx = rng.integers(0, n, size=num_pairs)
+    j_idx = rng.integers(0, n, size=num_pairs)
+    mask = i_idx == j_idx
+    while mask.any():
+        j_idx[mask] = rng.integers(0, n, size=int(mask.sum()))
+        mask = i_idx == j_idx
+    zi = z[i_idx]
+    zj = z[j_idx]
+    ni = np.linalg.norm(zi, axis=1)
+    nj = np.linalg.norm(zj, axis=1)
+    denom = np.clip(ni * nj, 1e-12, None)
+    cos = np.sum(zi * zj, axis=1) / denom
+    return {
+        "num_pairs": int(num_pairs),
+        "mean": float(cos.mean()),
+        "median": float(np.median(cos)),
+        "min": float(cos.min()),
+        "max": float(cos.max()),
+    }
+
+
+def _predictor_command_sensitivity(
+    jepa: TSJEPA,
+    z: np.ndarray,
+    normalizer: Any,
+    device: torch.device,
+    *,
+    n: int = 32,
+) -> dict[str, Any]:
+    """Does P(z, u) change when u is 0 vs ±20 N? Tiny deltas => command is ignored."""
+    n = min(int(n), int(z.shape[0]))
+    z_t = torch.from_numpy(np.asarray(z[:n], dtype=np.float32)).to(device)
+    kp = int(jepa.kp)
+
+    def _pred(u_phys: float) -> np.ndarray:
+        u_norm = normalizer.normalize(np.full((n, kp), u_phys, dtype=np.float32))
+        with torch.no_grad():
+            return jepa.predict(z_t, torch.from_numpy(u_norm).to(device)).cpu().numpy()
+
+    z0 = _pred(0.0)
+    zp = _pred(20.0)
+    zn = _pred(-20.0)
+    return {
+        "n_contexts": n,
+        "kp": kp,
+        "mean_l2_zero_vs_plus20": float(np.linalg.norm(z0 - zp, axis=-1).mean()),
+        "mean_l2_zero_vs_minus20": float(np.linalg.norm(z0 - zn, axis=-1).mean()),
+        "mean_l2_plus20_vs_minus20": float(np.linalg.norm(zp - zn, axis=-1).mean()),
+        "mean_cosine_plus20_vs_minus20": float(
+            np.mean(
+                np.sum(zp * zn, axis=-1)
+                / np.clip(np.linalg.norm(zp, axis=-1) * np.linalg.norm(zn, axis=-1), 1e-12, None)
+            )
+        ),
+        "std_pred_zero_cmd": float(z0.std()),
+        "std_pred_plus20": float(zp.std()),
+        "std_pred_minus20": float(zn.std()),
+    }
+
+
 def _classify(
     diversity: dict[str, Any],
     command_groups: dict[str, Any],
@@ -293,9 +402,12 @@ def run_diagnostic(
     sample_ids_arr = np.asarray(sample_ids, dtype=np.int64)
 
     diversity = _embedding_stats(z_all)
+    rank_stats = _effective_rank(z_all)
+    pairwise_cos = _pairwise_cosine(z_all, num_pairs=num_pairs, seed=seed)
     cross_sample = _pairwise_distances(z_all, num_pairs=num_pairs, seed=seed)
     command_groups = _command_group_stats(z_all, cmd_all)
     temporal = _temporal_prediction_stats(z_pred_all, reference_horizon_1based=1)
+    pred_cmd = _predictor_command_sensitivity(jepa, z_all, normalizer, device, n=32)
     sensitivity = _input_sensitivity_samples(
         z_all,
         cmd_all,
@@ -304,6 +416,60 @@ def run_diagnostic(
     )
 
     classification = _classify(diversity, command_groups, cross_sample)
+    cmd = np.asarray(cmd_all, dtype=np.float64).reshape(-1)
+    zero_frac = float(np.mean(np.abs(cmd) <= 1e-6))
+
+    # #region agent log
+    _agent_dbg(
+        "H1",
+        "diagnose_jepa_embeddings.py:run_diagnostic",
+        "context embedding collapse stats",
+        {
+            "global_std": diversity["global_std"],
+            "mean_per_dim_std": diversity["mean_per_dim_std"],
+            "unique_6dp": diversity["num_unique_embeddings_rounded_6dp"],
+            "effectively_identical": diversity["effectively_identical_across_contexts"],
+            "frac_near_zero_std_dims": diversity["fraction_dims_near_zero_std"],
+            "effective_rank": rank_stats["effective_rank"],
+            "top1_var_frac": rank_stats["top1_var_frac"],
+            "top5_var_frac": rank_stats["top5_var_frac"],
+            "pairwise_cosine_mean": pairwise_cos["mean"],
+            "cross_l2_mean": cross_sample["mean"],
+            "classification": classification,
+            "n": diversity["num_samples"],
+        },
+    )
+    _agent_dbg(
+        "H3",
+        "diagnose_jepa_embeddings.py:command_groups",
+        "command-group embedding separation and zero fraction",
+        {
+            "zero_fraction": zero_frac,
+            "neg_n": command_groups["negative"]["num_samples"],
+            "zero_n": command_groups["zero"]["num_samples"],
+            "pos_n": command_groups["positive"]["num_samples"],
+            "neg_zero_dist": command_groups["mean_vector_distances"]["negative_to_zero"],
+            "pos_zero_dist": command_groups["mean_vector_distances"]["positive_to_zero"],
+            "pos_neg_dist": command_groups["mean_vector_distances"]["positive_to_negative"],
+        },
+    )
+    _agent_dbg(
+        "H6",
+        "diagnose_jepa_embeddings.py:predictor_sensitivity",
+        "predictor output change under extreme commands",
+        pred_cmd,
+    )
+    _agent_dbg(
+        "H6",
+        "diagnose_jepa_embeddings.py:temporal_pred",
+        "horizon-wise predicted embedding variation",
+        {
+            "h1_std": temporal["per_horizon"][0]["std_global"],
+            "h15_std": temporal["per_horizon"][-1]["std_global"],
+            "h15_l2_to_h1": temporal["per_horizon"][-1]["mean_l2_distance_to_reference_horizon"],
+        },
+    )
+    # #endregion
 
     return {
         "label": label,
@@ -315,6 +481,10 @@ def run_diagnostic(
             "total_samples": int(z_all.shape[0]),
         },
         "context_embedding_diversity": diversity,
+        "embedding_effective_rank": rank_stats,
+        "pairwise_cosine": pairwise_cos,
+        "predictor_command_sensitivity": pred_cmd,
+        "command_zero_fraction": zero_frac,
         "cross_sample_embedding_distance": cross_sample,
         "embedding_vs_command_groups": command_groups,
         "temporal_predictive_representation": temporal,
@@ -338,6 +508,18 @@ def _print_summary(report: dict[str, Any]) -> None:
     print(f"embedding shape: {d['shape']}")
     print(f"global std: {d['global_std']:.6g} | mean per-dim std: {d['mean_per_dim_std']:.6g}")
     print(f"unique embeddings (6dp): {d['num_unique_embeddings_rounded_6dp']} | effectively identical: {d['effectively_identical_across_contexts']}")
+    r = main.get("embedding_effective_rank", {})
+    pc = main.get("pairwise_cosine", {})
+    print(
+        f"effective rank: {r.get('effective_rank')} | top1 var frac: {r.get('top1_var_frac')} | "
+        f"pairwise cosine mean: {pc.get('mean')}"
+    )
+    print(f"command zero fraction: {main.get('command_zero_fraction')}")
+    ps = main.get("predictor_command_sensitivity", {})
+    print(
+        "predictor Δ||z(+20)-z(-20)||: "
+        f"{ps.get('mean_l2_plus20_vs_minus20')} | cosine(+20,-20)={ps.get('mean_cosine_plus20_vs_minus20')}"
+    )
     print(f"cross-sample ||z_i-z_j|| mean/median: {c['mean']:.6g} / {c['median']:.6g}")
     dists = g["mean_vector_distances"]
     print(

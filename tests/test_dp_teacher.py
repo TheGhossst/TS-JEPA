@@ -37,9 +37,9 @@ def test_baseline_config_dp_grid_and_forces():
     ct = config["control_teacher"]
     assert ct["force_bins"] == 11
     assert ct["dp_substeps"] == 1
-    assert ct["value_iteration_iters"] == 50
+    assert ct["value_iteration_iters"] == 300
     assert ct["control_effort_weight"] == 0.001
-    assert ct["discount"] == 0.99
+    assert ct["discount"] == 1.0
     assert ct["grid"]["x"] == [-1.2, 1.2, 13]
     assert ct["grid"]["x_dot"] == [-2.5, 2.5, 11]
     assert ct["grid"]["theta"] == [-0.35, 0.35, 13]
@@ -93,6 +93,60 @@ def test_bellman_uses_successor_not_current_state_only():
     qs = [teacher._bellman_cost(s, float(u)) for u in teacher.forces]
     assert max(qs) - min(qs) > 1e-6
     assert np.isfinite(q0)
+
+
+def test_interpolated_value_matches_table_at_nodes():
+    teacher = _tiny_teacher(value_iteration_iters=2)
+    ix, ixd, ith, ithd = 1, 1, 2, 1
+    node = np.array(
+        [
+            teacher.grid.x[ix],
+            teacher.grid.x_dot[ixd],
+            teacher.grid.theta[ith],
+            teacher.grid.theta_dot[ithd],
+        ],
+        dtype=np.float64,
+    )
+    interp = teacher._interpolated_value(node.reshape(1, 4), teacher.value)[0]
+    assert abs(float(interp) - float(teacher.value[ix, ixd, ith, ithd])) < 1e-12
+
+
+def test_one_ms_successors_have_distinct_interpolated_continuation():
+    """Nearest-neighbor cells coincide at 1 ms; nodal Taylor V must still separate forces."""
+    env = InvertedCartPoleEnv(process_noise_std=0.0, dt=0.001)
+    teacher = DPControlTeacher(
+        env=env,
+        grid={
+            "x": [-1.2, 1.2, 13],
+            "x_dot": [-2.5, 2.5, 11],
+            "theta": [-0.35, 0.35, 13],
+            "theta_dot": [-3.0, 3.0, 11],
+        },
+        force_min=-20.0,
+        force_max=20.0,
+        force_bins=11,
+        value_iteration_iters=300,
+        control_effort_weight=0.001,
+        discount=1.0,
+        dp_substeps=1,
+        desired_state=[0.0, 0.0, 0.0, 0.0],
+    )
+    s = np.array([0.0, 0.0, 0.25, 0.0], dtype=np.float64)
+    cells = []
+    v_nn = []
+    v_interp = []
+    for u in (-20.0, 0.0, 20.0):
+        final, _ = teacher._rollout_constant_force(s, u)
+        cells.append(tuple(teacher._index_of(np.asarray(final, dtype=np.float64))))
+        v_nn.append(float(teacher.value[cells[-1]]))
+        v_interp.append(float(teacher._interpolated_value(np.asarray(final).reshape(1, 4), teacher.value)[0]))
+    assert len(set(cells)) == 1
+    assert max(v_nn) - min(v_nn) == 0.0
+    assert max(v_interp) - min(v_interp) > 1e-8
+    u_pos = float(teacher.act(s))
+    u_neg = float(teacher.act(np.array([0.0, 0.0, -0.25, 0.0], dtype=np.float64)))
+    assert u_pos > 0.0
+    assert u_neg < 0.0
 
 
 def test_quantization_nearest_neighbor():

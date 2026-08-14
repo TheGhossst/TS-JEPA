@@ -524,7 +524,11 @@ def _train_ts_jepa_body(
                 try:
                     watchdog.touch(micro=micros_seen, stage="optimizer")
                     # Plan §10 Algorithm 1 steps 5–6: SGD(θ,ϕ) then EMA(θ̄).
-                    jepa_sgd_and_ema_step(model, optimizer)
+                    jepa_sgd_and_ema_step(
+                        model,
+                        optimizer,
+                        max_grad_norm=float(opt_cfg.get("grad_clip_norm", 0.0)) or None,
+                    )
                     assert group_loss_sum is not None
                     step_loss = float(group_loss_sum.item()) / accum_steps
                 except Exception as exc:

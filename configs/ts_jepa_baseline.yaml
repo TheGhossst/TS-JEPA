@@ -66,9 +66,15 @@ control_teacher:  # method PAPER-SPECIFIED; numeric grids PAPER-SILENT → IC
   force_max_N: 20.0
   force_bins: 11
   control_effort_weight: 0.001
-  discount: 0.99
-  value_iteration_iters: 50  # IC
+  # Eq. 3 is undiscounted finite-horizon. 0.99 per 1 ms step is ~50× more myopic
+  # than the same 0.99 paired with the illegal 50 ms Bellman; keep γ=1 and a
+  # finite backup count instead.
+  discount: 1.0
+  value_iteration_iters: 300  # IC finite horizon ≈ 300 ms ≈ 1.3/ω_pendulum
   dp_substeps: 1  # PAPER-IMPLIED — one Bellman transition = one τ_o = 1 ms (Eq. 2 subject to Eq. 1)
+  # IC: nodal Taylor V(s')≈V(s_g)+∇V·(s'−s_g). NN and multilinear both make u=0
+  # dominate at 1 ms (successors share a cell / kink at θ̇=0).
+  value_interpolation: nodal_taylor
   grid:
     x: [-1.2, 1.2, 13]
     x_dot: [-2.5, 2.5, 11]
@@ -140,6 +146,7 @@ ts_jepa:
     fig7_candidate_dimensions: [64, 128, 256, 350]
     blocks_per_stage: 2  # IC — not paper-specified
     spatial_pool_hw: [4, 8]  # IC — not GAP; paper is silent on pooling/head
+    l2_normalize: true  # IC — cosine Eq. (13) is direction-only; not a paper layer
     stem:  # IC — not paper architecture (plan §7)
       kernel_size: 7
       stride: 2
@@ -158,6 +165,8 @@ ts_jepa:
     activation: ReLU  # IC — plan §9 specifies 1024/256 MLP, not the hidden nonlinearity
     input_tensor_construction: concat_embedding_and_command  # IC — concat vs other fusion is NOT SPECIFIED
     autoregressive: true
+    detach_autoregressive_state: true  # IC — Eq. (13) is one-step cosine; 15-step BPTT is not specified
+    l2_normalize_output: true  # IC — keep Pφ on the same unit sphere as Ψ
     inputs: [embedding, control_command]
     forbidden_inputs: [virtual_inputs, virtual_channel_variables, virtual_channel_embeddings]
     command_source: teacher_dp
@@ -189,6 +198,8 @@ ts_jepa:
     microbatch_size: 16  # IC — GPU memory; accumulation = batch_size / microbatch_size
     epochs: 150
     weight_decay: 0.0004
+    weight_decay_exclude_batchnorm: true  # IC — Table II does not mention BN; WD on BN affine oscillates cosine JEPA
+    grad_clip_norm: 1.0  # IC — Table II silent; clips 15-step predictor grads under SGD 0.2
     momentum: 0.0  # IC — Table II does not specify SGD momentum
   lr_decay:  # plan §11 — multiply LR by 0.99 every 20 epochs
     factor: 0.99

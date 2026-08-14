@@ -73,18 +73,19 @@ Paper typesets a product of fractions that drives P_LoS → 0 at Table IV geomet
 
 | Choice | Value | Notes |
 |--------|-------|-------|
-| Method | discretized discounted value iteration + local action refinement | paper requires nonlinear DP; grids/`R` unspecified |
+| Method | discretized finite-horizon value iteration + local action refinement | paper requires nonlinear DP and Eq. 3 is undiscounted; grids/`R`/`K` unspecified |
 | Dataset control source | `dp_nonlinear` (recorded in each `.npz`) | plan §4.1 — **not** `Uniform(-20, 20)` |
 | Post-generation verification | `verify_not_uniform_random_actions()` | peaked histogram **or** lag-1 autocorr vs uniform-iid (1 ms DP may lack persistence) |
 | Physics `dt` | `0.001` s | matches simulation sampling |
 | DP substeps `N` | `1` | PAPER-IMPLIED: one Bellman transition = one \(\tau_o\) (Eq. 2 subject to Eq. 1). Not an IC. |
+| Value interpolation | nodal Taylor \(V(s_g)+∇V·(s'−s_g)\) | IC. At 1 ms, ±20 N moves \(\dot\theta\) by ~0.06 rad/s vs 0.6 rad/s grid spacing, so nearest-neighbor maps every force to one cell and \(u=0\) wins on \(\tfrac12 R u^2\). Multilinear interpolation still fails: convex \(V\) plus a velocity node at 0 creates a kink, so any 1 ms motion looks costly. Central-difference \(∇V\) recovers the mixed partial that prefers restoring \(u\). Grid is **not** refined to manufacture NN cell splits (that would need ~0.003 rad/s \(\dot\theta\) bins). |
 | Stage cost | `½‖s_{k+1}−s★‖² + ½ R u²` | one-step state cost; control charged **once** per DP decision |
 | Control effort weight `R` | `0.001` | scalar stand-in for positive-definite `R` |
 | Init state noise | `±0.35` (±0.175 on θ) | IC — wide enough to leave π≈0 deadzone under Ns=0 |
-| Discount | `0.99` | unspecified |
-| Value-iteration iters | `50` | unspecified |
+| Discount | `1.0` (finite \(K\)) | Eq. 3 has no \(\gamma\). Do not keep \(0.99\) per 1 ms step: that horizon is ~100 ms and restoring \(Q\) loses to \(\tfrac12 R u^2\). |
+| Value-iteration iters \(K\) | `300` | IC finite horizon \(\approx 300\) ms \(\approx 1.3/\omega\). 50 backups was leftover from the 50 ms Bellman and only looks 50 ms ahead at 1 ms. |
 | Force bins | `11` in `[-20,20]` | unspecified discretization |
-| State grids | `x×13`, `ẋ×11`, `θ×13`, `θ̇×11` (see YAML) | unspecified |
+| State grids | `x×13`, `ẋ×11`, `θ×13`, `θ̇×11` (see YAML) | unspecified; **not** refined to “see” 1 ms NN cells (that would need ~0.01 rad/s \(\dot\theta\) bins) |
 | `act()` | same one-step Bellman cost as VI | local discrete re-opt over table ± neighbors |
 
 ## Input tensor construction
@@ -125,7 +126,8 @@ in baseline entry scripts (not inside the train loop — smoke tests may shrink 
 | Learning rate | `0.2` |
 | Batch size | `256` (effective; microbatch accumulation is IC) |
 | Epochs | `150` |
-| Weight decay | `0.0004` |
+| Weight decay | `0.0004` on non-BN weights; **BN affine WD = 0** (IC) |
+| Grad clip | `1.0` (IC; Table II silent) |
 | EMA decay η | `0.99` |
 | LR schedule | ×`0.99` every `20` epochs |
 | Kp / κ / emb | `15` / `2` / `256` |
@@ -161,8 +163,9 @@ Everything below is IC (plan §7: do not label stem / MaxPool / GAP / 4×8 as pa
 | Stage 64 | residual, stride 1 (IC) |
 | Stage 128 | residual, stride 2 (IC) |
 | Stage 256 | residual, stride 2 (IC) |
-| Head | spatial pool `4×8` → flatten → linear (IC; not GAP) |
+| Head | spatial pool `4×8` → flatten → linear → **L2-normalize** (IC; not GAP) |
 | Blocks per stage | `2` (IC) |
+| Embedding L2-norm | `F.normalize` on Ψ outputs (IC). Paper Eq. (13) is cosine / direction-only; unbounded z + SGD 0.2 makes 15-step AR oscillate. |
 | Target trainable | `false` — frozen, stop-gradient forward (paper) |
 | Target update | EMA `θ̄ ← η θ̄ + (1-η) θ`, η=0.99 (paper) |
 | BN running-stat buffers | same EMA as θ (float buffers); integer buffers copied |
@@ -196,8 +199,9 @@ Hidden ReLU, concat, and input width 257 are IC.
 | Component | Value |
 |-----------|-------|
 | Type | MLP |
-| Stack | `Linear(257→1024) → ReLU → Linear(1024→256)` (ReLU and concat fusion are IC) |
-| Autoregressive | `z_{j+1} = Pφ(concat(z_j, u_j))` |
+| Stack | `Linear(257→1024) → ReLU → Linear(1024→256) → L2-normalize` (ReLU, concat, and L2 are IC) |
+| Autoregressive | `z_{j+1} = normalize(Pφ(concat(z_j, u_j)))`; next input is `z_{j+1}.detach()` |
+| AR truncation | Detach between steps (IC). Paper Eq. (12) is still unrolled. Eq. (13) writes one-step cosine `ẑ_{k+1}`; 15-step BPTT is not specified and is unstable with Table II SGD 0.2. Encoder cosine matches the first step; Pφ is trained at every horizon step. |
 | Inputs | embedding + scalar control only |
 | Forbidden | virtual inputs / channel variables / channel embeddings |
 

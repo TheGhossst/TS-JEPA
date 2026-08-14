@@ -60,6 +60,12 @@ class TSJEPA(nn.Module):
         self.ema_decay = float(config["ts_jepa"]["target_encoder"]["ema_decay"])
         self.kp = int(config["ts_jepa"]["prediction_horizon"]["Kp"])
 
+    def train(self, mode: bool = True) -> TSJEPA:
+        """Keep Ψθ̄ in eval. Plan §8: target is stop-grad + EMA, not a trained BN branch."""
+        super().train(mode)
+        self.target_encoder.eval()
+        return self
+
     def encode_context(self, context: torch.Tensor) -> torch.Tensor:
         return self.context_encoder(context)
 
@@ -70,6 +76,7 @@ class TSJEPA(nn.Module):
 
         future_frames: [B, Kp, 3, H, W] → [B, Kp, D] (one RGB frame per target step).
         """
+        self.target_encoder.eval()
         b, kp, c, h, w = future_frames.shape
         flat = future_frames.reshape(b * kp, c, h, w)
         chunks = []

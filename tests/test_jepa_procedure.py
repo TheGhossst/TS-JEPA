@@ -49,6 +49,20 @@ def test_jepa_forward_batch_shapes_and_loss():
     assert result.commands_norm.shape == (b, kp)
 
 
+def test_predictor_detach_blocks_bptt_into_encoder():
+    """Later-horizon cosine must not backprop through previous Pφ steps into Ψθ."""
+    config = load_config()
+    model = TSJEPA(config)
+    b, kp = 2, int(config["ts_jepa"]["prediction_horizon"]["Kp"])
+    context = torch.randn(b, 3, 64, 128, requires_grad=False)
+    commands = torch.randn(b, kp)
+    z = model.encode_context(context)
+    z_pred = model.predict(z, commands)
+    z_pred[:, -1].sum().backward()
+    assert all(p.grad is None or torch.count_nonzero(p.grad) == 0 for p in model.context_encoder.parameters())
+    assert any(p.grad is not None and torch.count_nonzero(p.grad) > 0 for p in model.predictor.parameters())
+
+
 def test_jepa_forward_target_has_no_grad_graph():
     config = load_config()
     model = TSJEPA(config)

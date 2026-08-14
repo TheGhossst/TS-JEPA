@@ -5,14 +5,39 @@ from __future__ import annotations
 from typing import Any
 
 import torch
+import torch.nn as nn
 
 from ts_jepa.models.ts_jepa import TSJEPA
 from ts_jepa.plan.training import IC_SGD_MOMENTUM, PLAN_JEPA_TRAINING
+
+_BN_TYPES = (nn.BatchNorm1d, nn.BatchNorm2d, nn.SyncBatchNorm)
 
 
 def jepa_trainable_parameters(model: TSJEPA) -> list[torch.nn.Parameter]:
     """Plan §10 Algorithm 1 steps 5–6: optimize θ (context encoder) and ϕ (predictor) only."""
     return list(model.context_encoder.parameters()) + list(model.predictor.parameters())
+
+
+def jepa_sgd_param_groups(model: TSJEPA, weight_decay: float) -> list[dict[str, Any]]:
+    """
+    Table II weight decay 0.0004. BatchNorm affine params are excluded (IC):
+    cosine JEPA + WD on BN scale is a known oscillation source and is not specified.
+    """
+    decay: list[nn.Parameter] = []
+    no_decay: list[nn.Parameter] = []
+    seen: set[int] = set()
+    for module in (model.context_encoder, model.predictor):
+        for submodule in module.modules():
+            bucket = no_decay if isinstance(submodule, _BN_TYPES) else decay
+            for param in submodule.parameters(recurse=False):
+                if not param.requires_grad or id(param) in seen:
+                    continue
+                bucket.append(param)
+                seen.add(id(param))
+    groups = [{"params": decay, "weight_decay": float(weight_decay)}]
+    if no_decay:
+        groups.append({"params": no_decay, "weight_decay": 0.0})
+    return groups
 
 
 def build_jepa_optimizer(model: TSJEPA, config: dict[str, Any]) -> torch.optim.SGD:
@@ -31,9 +56,8 @@ def build_jepa_optimizer(model: TSJEPA, config: dict[str, Any]) -> torch.optim.S
         )
     momentum = float(opt_cfg.get("momentum", IC_SGD_MOMENTUM))
     return torch.optim.SGD(
-        jepa_trainable_parameters(model),
+        jepa_sgd_param_groups(model, float(opt_cfg["weight_decay"])),
         lr=float(opt_cfg["learning_rate"]),
-        weight_decay=float(opt_cfg["weight_decay"]),
         momentum=momentum,
     )
 

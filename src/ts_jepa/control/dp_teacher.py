@@ -37,9 +37,19 @@ class DPControlTeacher:
     index k has period τ_o; with env.ode.dt = τ_o this means one Bellman
     transition = one physics step (dp_substeps=1).
 
+    Continuation uses a nodal first-order Taylor expansion of V (IC):
+      V(s') ≈ V(s_g) + ∇V(s_g)·(s'−s_g)
+    with central-difference ∇V. Nearest-neighbor lookup collapses every 1 ms
+    successor into one cell. Multilinear interpolation still fails: V is convex,
+    the velocity axes include a node at 0, and piecewise-linear V has a kink so
+    any 1 ms motion looks costly and u=0 wins. The Taylor form recovers the
+    mixed partial ∂²V/∂θ∂θ̇ that prefers restoring forces at 1 ms.
+
     Remaining IMPLEMENTATION CHOICES (paper-silent):
       - integrated successor state cost + control cost charged once per DP decision
-      - R, gamma, VI iters, grid resolution, force bins
+      - R, finite horizon K (VI iters), grid resolution, force bins
+      - nodal Taylor continuation of V at continuous 1 ms successors
+      - undiscounted backups (Eq. 3 has no γ; γ=0.99 per 1 ms is unusable)
     """
 
     def __init__(
@@ -50,8 +60,8 @@ class DPControlTeacher:
         force_max: float = 20.0,
         force_bins: int = 11,
         control_effort_weight: float = 0.001,
-        discount: float = 0.99,
-        value_iteration_iters: int = 50,
+        discount: float = 1.0,
+        value_iteration_iters: int = 300,
         desired_state: list[float] | None = None,
         dp_substeps: int = 1,
     ) -> None:
@@ -90,10 +100,10 @@ class DPControlTeacher:
         return ix, ixd, ith, ithd
 
     def _lookup_value(self, state: np.ndarray) -> float:
-        return float(self.value[self._index_of(state)])
+        return float(self._interpolated_value(np.asarray(state, dtype=np.float64).reshape(1, 4), self.value)[0])
 
     def _quantize_indices(self, states: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Nearest-neighbor grid indices for states shaped [..., 4]."""
+        """Nearest-neighbor grid indices for states shaped [..., 4] (table lookup only)."""
         flat = states.reshape(-1, 4)
 
         def _nearest(axis: np.ndarray, values: np.ndarray) -> np.ndarray:
@@ -112,6 +122,55 @@ class DPControlTeacher:
     def _nearest_value(self, states: np.ndarray, value: np.ndarray) -> np.ndarray:
         ix, ixd, ith, ithd = self._quantize_indices(states)
         return value[ix, ixd, ith, ithd]
+
+    def _value_gradients(
+        self, value: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        gx, gxd, gth, gthd = np.gradient(
+            value,
+            self.grid.x,
+            self.grid.x_dot,
+            self.grid.theta,
+            self.grid.theta_dot,
+            edge_order=1,
+        )
+        return gx, gxd, gth, gthd
+
+    def _interpolated_value(
+        self,
+        states: np.ndarray,
+        value: np.ndarray,
+        grads: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None,
+    ) -> np.ndarray:
+        """
+        Nodal Taylor continuation: V(s') ≈ V(s_g) + ∇V(s_g)·(s'−s_g).
+
+        s_g is the nearest grid node. ∇V is central difference on the table.
+        Exact at grid nodes. Resolves 1 ms successor differences that neither
+        nearest-neighbor nor multilinear interpolation can see.
+        """
+        states = np.asarray(states, dtype=np.float64)
+        ix, ixd, ith, ithd = self._quantize_indices(states)
+        if grads is None:
+            grads = self._value_gradients(value)
+        gx, gxd, gth, gthd = grads
+        node = np.stack(
+            [
+                self.grid.x[ix],
+                self.grid.x_dot[ixd],
+                self.grid.theta[ith],
+                self.grid.theta_dot[ithd],
+            ],
+            axis=-1,
+        )
+        delta = states - node
+        return (
+            value[ix, ixd, ith, ithd]
+            + gx[ix, ixd, ith, ithd] * delta[..., 0]
+            + gxd[ix, ixd, ith, ithd] * delta[..., 1]
+            + gth[ix, ixd, ith, ithd] * delta[..., 2]
+            + gthd[ix, ixd, ith, ithd] * delta[..., 3]
+        )
 
     def _rollout_constant_force(
         self, states: np.ndarray, force: float
@@ -144,7 +203,7 @@ class DPControlTeacher:
         value = self.value if value is None else value
         final, stage = self._rollout_constant_force(state, float(force))
         assert isinstance(stage, float)
-        return float(stage + self.discount * self._nearest_value(final.reshape(1, 4), value)[0])
+        return float(stage + self.discount * self._interpolated_value(final.reshape(1, 4), value)[0])
 
     def _solve(self) -> None:
         states = np.stack([self._xx, self._xd, self._th, self._thd], axis=-1)
@@ -160,10 +219,11 @@ class DPControlTeacher:
             stage_costs.append(stage)
 
         for _ in range(self.value_iteration_iters):
+            grads = self._value_gradients(value)
             best_cost = np.full(self.grid.shape, np.inf, dtype=np.float64)
             best_force = np.zeros(self.grid.shape, dtype=np.float64)
             for force, nxt, stage in zip(self.forces, transitions, stage_costs):
-                total = stage + self.discount * self._nearest_value(nxt, value)
+                total = stage + self.discount * self._interpolated_value(nxt, value, grads)
                 # Prefer improvement; on ties keep smaller |u| (then existing).
                 improve = total < best_cost - 1e-12
                 tie = np.abs(total - best_cost) <= 1e-12

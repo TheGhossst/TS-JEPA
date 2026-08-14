@@ -23,6 +23,7 @@ from ts_jepa.models.predictor_command_resolution import (
 )
 from ts_jepa.models.ts_jepa import TSJEPA
 from ts_jepa.plan.procedure import PLAN_JEPA_PROCEDURE, assert_plan_jepa_procedure_config
+from ts_jepa.training.jepa_optimizer import jepa_trainable_parameters
 
 __all__ = [
     "JEPAForwardResult",
@@ -82,13 +83,20 @@ def jepa_forward_batch(
     )
 
 
-def jepa_sgd_and_ema_step(model: TSJEPA, optimizer: torch.optim.Optimizer) -> None:
+def jepa_sgd_and_ema_step(
+    model: TSJEPA,
+    optimizer: torch.optim.Optimizer,
+    max_grad_norm: float | None = None,
+) -> None:
     """
     Plan §10 Algorithm 1 steps 5–6: SGD on θ,ϕ then EMA on θ̄.
 
     Call once per effective batch (after gradient accumulation completes).
+    ``max_grad_norm`` is an implementation choice (Table II is silent).
     """
     # Step 5 — gradient update (θ, ϕ only; optimizer was built that way)
+    if max_grad_norm is not None and float(max_grad_norm) > 0.0:
+        torch.nn.utils.clip_grad_norm_(jepa_trainable_parameters(model), float(max_grad_norm))
     optimizer.step()
     # Step 6 — EMA target update
     model.ema_step()
