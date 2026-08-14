@@ -76,6 +76,40 @@ def apply_jepa_lr_decay(optimizer: torch.optim.Optimizer, config: dict[str, Any]
     return float(optimizer.param_groups[0]["lr"])
 
 
+def jepa_warmup_epochs(config: dict[str, Any]) -> int:
+    """Linear warmup length (IC). Table II is silent; 0 disables warmup."""
+    return max(0, int(config["ts_jepa"]["optimizer"].get("lr_warmup_epochs", 0)))
+
+
+def jepa_scheduled_lr(epoch: int, config: dict[str, Any]) -> float:
+    """
+    Learning rate used *during* 1-indexed training epoch ``epoch``.
+
+    IC linear warmup for the first ``lr_warmup_epochs`` epochs, then Table II
+    peak LR 0.2 with ×0.99 every 20 completed epochs.
+    Epoch 1 uses ``base / warmup`` (not 0) so the first epoch still takes a step.
+    """
+    base = float(config["ts_jepa"]["optimizer"]["learning_rate"])
+    warmup = jepa_warmup_epochs(config)
+    factor = float(config["ts_jepa"]["lr_decay"]["factor"])
+    interval = int(config["ts_jepa"]["lr_decay"]["interval_epochs"])
+    e = max(1, int(epoch))
+    if warmup > 0 and e <= warmup:
+        return base * float(e) / float(warmup)
+    n_decay = (e - 1) // interval
+    return base * (float(factor) ** n_decay)
+
+
+def apply_jepa_scheduled_lr(
+    optimizer: torch.optim.Optimizer, epoch: int, config: dict[str, Any]
+) -> float:
+    """Write the scheduled LR into every param group. Returns that LR."""
+    lr = jepa_scheduled_lr(epoch, config)
+    for group in optimizer.param_groups:
+        group["lr"] = lr
+    return lr
+
+
 def jepa_learning_rate_at_epoch(
     base_lr: float,
     epoch: int,
@@ -84,9 +118,9 @@ def jepa_learning_rate_at_epoch(
     interval_epochs: int = PLAN_JEPA_TRAINING["lr_decay_interval_epochs"],
 ) -> float:
     """
-    Learning rate after completing `epoch` epochs (decay at epochs 20, 40, ...).
+    Table II decay only: LR after completing `epoch` epochs (decay at 20, 40, ...).
 
-    Matches `train_jepa` which applies decay when `epoch % interval_epochs == 0`.
+    Does not include the IC warmup. Prefer ``jepa_scheduled_lr`` in the train loop.
     """
     if epoch <= 0:
         return float(base_lr)

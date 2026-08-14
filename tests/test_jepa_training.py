@@ -11,8 +11,10 @@ from ts_jepa.config import load_config
 from ts_jepa.models.ts_jepa import TSJEPA
 from ts_jepa.training.jepa_optimizer import (
     apply_jepa_lr_decay,
+    apply_jepa_scheduled_lr,
     build_jepa_optimizer,
     jepa_learning_rate_at_epoch,
+    jepa_scheduled_lr,
     jepa_trainable_parameters,
     should_apply_jepa_lr_decay,
 )
@@ -56,11 +58,13 @@ def test_build_jepa_optimizer_is_sgd_with_plan_hparams():
     assert opt_params == trainable
     assert trainable.isdisjoint(target_params)
     bn_param_ids = set()
-    for module in model.context_encoder.modules():
-        if isinstance(module, torch.nn.BatchNorm2d):
-            bn_param_ids.update(id(p) for p in module.parameters(recurse=False))
+    for module in (model.context_encoder, model.predictor):
+        for submodule in module.modules():
+            if isinstance(submodule, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d)):
+                bn_param_ids.update(id(p) for p in submodule.parameters(recurse=False))
     opt_bn_ids = {id(p) for g in bn_groups for p in g["params"]}
     assert bn_param_ids == opt_bn_ids
+    assert any(isinstance(m, torch.nn.BatchNorm1d) for m in model.predictor.modules())
 
 
 def test_build_jepa_optimizer_allows_smoke_batch_override():
@@ -91,6 +95,37 @@ def test_lr_schedule_matches_plan_section11():
     assert jepa_learning_rate_at_epoch(base, 40) == pytest.approx(base * 0.99**2)
     assert should_apply_jepa_lr_decay(20, config)
     assert not should_apply_jepa_lr_decay(19, config)
+
+
+def test_ic_linear_warmup_then_table_ii_decay():
+    """Warmup is IC; peak LR and ×0.99/20 remain Table II."""
+    config = load_config()
+    base = float(config["ts_jepa"]["optimizer"]["learning_rate"])
+    warmup = int(config["ts_jepa"]["optimizer"]["lr_warmup_epochs"])
+    assert warmup == 10
+    assert abs(base - 0.2) < 1e-12
+    assert jepa_scheduled_lr(1, config) == pytest.approx(base / warmup)
+    assert jepa_scheduled_lr(warmup, config) == pytest.approx(base)
+    assert jepa_scheduled_lr(warmup + 1, config) == pytest.approx(base)
+    assert jepa_scheduled_lr(20, config) == pytest.approx(base)
+    assert jepa_scheduled_lr(21, config) == pytest.approx(base * 0.99)
+    assert jepa_scheduled_lr(41, config) == pytest.approx(base * 0.99**2)
+
+
+def test_apply_jepa_scheduled_lr_writes_warmup_value():
+    config = load_config()
+    model = TSJEPA(config)
+    optimizer = build_jepa_optimizer(model, config)
+    lr = apply_jepa_scheduled_lr(optimizer, 1, config)
+    assert lr == pytest.approx(0.02)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.02)
+
+
+def test_warmup_epochs_are_not_a_plan_requirement():
+    config = copy.deepcopy(load_config())
+    config["ts_jepa"]["optimizer"]["lr_warmup_epochs"] = 0
+    assert_plan_jepa_training_config(config)
+    assert jepa_scheduled_lr(1, config) == pytest.approx(0.2)
 
 
 def test_apply_jepa_lr_decay_updates_optimizer():

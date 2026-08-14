@@ -15,9 +15,8 @@ from ts_jepa.device import select_device
 from ts_jepa.models.predictor_command_resolution import load_predictor_command_resolution
 from ts_jepa.models.ts_jepa import TSJEPA
 from ts_jepa.training.jepa_optimizer import (
-    apply_jepa_lr_decay,
+    apply_jepa_scheduled_lr,
     build_jepa_optimizer,
-    should_apply_jepa_lr_decay,
 )
 from ts_jepa.training.jepa_procedure import jepa_forward_batch, jepa_sgd_and_ema_step
 from ts_jepa.runtime import (
@@ -44,7 +43,14 @@ def _set_seed(seed: int) -> None:
 
 
 _ENCODER_ARCH_KEYS = ("type", "widths", "embedding_dim", "blocks_per_stage", "batch_norm", "activation")
-_PREDICTOR_ARCH_KEYS = ("type", "hidden_dim", "output_dim", "activation", "autoregressive")
+_PREDICTOR_ARCH_KEYS = (
+    "type",
+    "hidden_dim",
+    "output_dim",
+    "activation",
+    "autoregressive",
+    "hidden_batch_norm",
+)
 _PREDICTOR_COMMAND_RESOLUTION_KEYS = ("selected_source", "paper_exact")
 
 
@@ -88,6 +94,11 @@ def validate_checkpoint_config_compatibility(
         ("batch_size", ckpt_effective_bs, cur_effective_bs),
         ("microbatch_size", ckpt_micro_bs, cur_micro_bs),
         ("ema_decay", ckpt_ts["target_encoder"]["ema_decay"], cur_ts["target_encoder"]["ema_decay"]),
+        (
+            "lr_warmup_epochs",
+            int(ckpt_opt.get("lr_warmup_epochs", 0)),
+            int(cur_opt.get("lr_warmup_epochs", 0)),
+        ),
     ]
     mismatches = [f"{name}: checkpoint={a!r} current={b!r}" for name, a, b in scalar_checks if a != b]
     for key in _PREDICTOR_COMMAND_RESOLUTION_KEYS:
@@ -464,6 +475,7 @@ def _train_ts_jepa_body(
         model.context_encoder.train()
         model.predictor.train()
         model.target_encoder.eval()
+        epoch_lr = apply_jepa_scheduled_lr(optimizer, epoch, config)
         train_loss = 0.0
         n_steps = 0
         micro_in_group = 0
@@ -471,6 +483,7 @@ def _train_ts_jepa_body(
         group_loss_sum: torch.Tensor | None = None
         optimizer.zero_grad(set_to_none=True)
         watchdog.begin_epoch(epoch, n_micros_used)
+        watchdog.log(f"epoch={epoch} lr={epoch_lr:.6g} GPU={gpu_mem_str(device)}")
         prefetcher = CUDAPrefetcher(train_loader, device)
         try:
             batch_iter = iter(
@@ -593,10 +606,6 @@ def _train_ts_jepa_body(
             watchdog.log(f"saved best.pt epoch={epoch} val_loss={best_val:.6f}")
         else:
             stale += 1
-
-        if should_apply_jepa_lr_decay(epoch, config):
-            new_lr = apply_jepa_lr_decay(optimizer, config)
-            watchdog.log(f"lr decayed to {new_lr}")
 
         if config["ts_jepa"]["early_stopping"]["enabled"] and stale >= patience:
             watchdog.log(f"early stop epoch={epoch} stale={stale}")

@@ -19,6 +19,8 @@ PLAN_PREDICTOR: dict[str, Any] = {
 
 # Hidden-layer nonlinearity is NOT SPECIFIED in plan §9 (actor ReLU is §12).
 IC_PREDICTOR_ACTIVATION = "ReLU"
+# Hidden BatchNorm1d is NOT SPECIFIED. Baseline uses it to condition SGD 0.2 (IC).
+IC_PREDICTOR_HIDDEN_BATCH_NORM = True
 
 
 def assert_plan_predictor_config(config: dict[str, Any]) -> None:

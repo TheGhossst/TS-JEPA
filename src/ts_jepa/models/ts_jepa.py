@@ -53,6 +53,7 @@ class TSJEPA(nn.Module):
             command_dim=1,
             hidden_dim=int(pred_cfg["hidden_dim"]),
             output_dim=int(pred_cfg["output_dim"]),
+            hidden_batch_norm=bool(pred_cfg.get("hidden_batch_norm", True)),
             strict_baseline_dim=strict_dim,
         )
         self.command_source = str(pred_cfg.get("command_source", "teacher_dp"))

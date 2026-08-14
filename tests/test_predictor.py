@@ -30,7 +30,10 @@ def test_predictor_mlp_layer_sizes():
     assert pred.fc_out.in_features == 1024
     assert pred.fc_out.out_features == 256
     summary = pred.architecture_summary()
-    assert summary["stack"] == "Linear-1024-ReLU-Linear-256-L2Norm"
+    assert summary["stack"] == "Linear-1024-BN-ReLU-Linear-256-L2Norm"
+    assert summary["hidden_batch_norm"] is True
+    assert isinstance(pred.bn, torch.nn.BatchNorm1d)
+    assert pred.bn.num_features == 1024
     assert summary["autoregressive"] is True
     assert summary["detach_autoregressive_state"] is True
 
@@ -91,6 +94,15 @@ def test_plan_predictor_config_rejects_virtual_channel_input():
     config["ts_jepa"]["predictor"]["inputs"] = ["embedding", "control_command", "virtual_channel_embeddings"]
     with pytest.raises(ValueError, match="virtual_channel"):
         assert_plan_predictor_config(config)
+
+
+def test_predictor_hidden_bn_is_not_a_plan_requirement():
+    """Plan §9: hidden BatchNorm1d is NOT SPECIFIED."""
+    config = copy.deepcopy(load_config())
+    config["ts_jepa"]["predictor"]["hidden_batch_norm"] = False
+    assert_plan_predictor_config(config)
+    pred = Predictor(hidden_batch_norm=False)
+    assert pred.architecture_summary()["stack"] == "Linear-1024-ReLU-Linear-256-L2Norm"
 
 
 def test_concat_fusion_is_not_a_plan_requirement():

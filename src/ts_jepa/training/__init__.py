@@ -2,8 +2,10 @@
 
 from ts_jepa.training.jepa_optimizer import (
     apply_jepa_lr_decay,
+    apply_jepa_scheduled_lr,
     build_jepa_optimizer,
     jepa_learning_rate_at_epoch,
+    jepa_scheduled_lr,
     jepa_trainable_parameters,
     should_apply_jepa_lr_decay,
 )
@@ -23,9 +25,11 @@ __all__ = [
     "assert_plan_jepa_procedure_config",
     "assert_plan_jepa_training_config",
     "apply_jepa_lr_decay",
+    "apply_jepa_scheduled_lr",
     "build_jepa_optimizer",
     "jepa_forward_batch",
     "jepa_learning_rate_at_epoch",
+    "jepa_scheduled_lr",
     "jepa_sgd_and_ema_step",
     "jepa_trainable_parameters",
     "should_apply_jepa_lr_decay",

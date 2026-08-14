@@ -743,12 +743,14 @@ pretraining). Tests must reject `paper_exact: true`, not require it.
 
 Paper specifies MLP hidden **1024**, output **256**, command-conditioned.
 
-**IC (this repo):** `concat(z, u)` → `Linear(257, 1024)` → ReLU →
+**IC (this repo):** `concat(z, u)` → `Linear(257, 1024)` → BatchNorm1d → ReLU →
 `Linear(1024, 256)` → L2-normalize; next AR input is detached
-(`detach_autoregressive_state`). Config: `predictor.input_tensor_construction`.
-Eq. (12) is still unrolled. Eq. (13) is one-step cosine; full 15-step
-BPTT is not paper-specified. Exclude BatchNorm from SGD weight decay;
-clip grads at `1.0` (both IC).
+(`detach_autoregressive_state`). Config: `predictor.input_tensor_construction`,
+`predictor.hidden_batch_norm`. Eq. (12) is still unrolled. Eq. (13) is
+one-step cosine; full 15-step BPTT is not paper-specified. Exclude
+BatchNorm from SGD weight decay; clip grads at `1.0` (both IC). Linear
+LR warmup over 10 epochs from `0.02` to Table II `0.2` is IC (Table II
+is silent; stabilizes EMA under the paper peak LR).
 
 ### Actor output activation
 

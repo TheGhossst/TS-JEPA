@@ -11,8 +11,8 @@ class Predictor(nn.Module):
 
     Paper-specified: hidden 1024, output 256, autoregressive, command-conditioned.
 
-    Hidden ReLU, concat fusion, and input width 257 are IMPLEMENTATION CHOICES (plan §9 / §18).
-    Virtual-channel inputs are forbidden.
+    Hidden ReLU, concat fusion, input width 257, and hidden BatchNorm1d are
+    IMPLEMENTATION CHOICES (plan §9 / §18). Virtual-channel inputs are forbidden.
     """
 
     def __init__(
@@ -22,6 +22,7 @@ class Predictor(nn.Module):
         hidden_dim: int = 1024,
         output_dim: int | None = None,
         *,
+        hidden_batch_norm: bool = True,
         strict_baseline_dim: bool = True,
     ) -> None:
         super().__init__()
@@ -43,16 +44,20 @@ class Predictor(nn.Module):
         self.hidden_dim = int(hidden_dim)
         self.output_dim = out_dim
         self.input_dim = self.embedding_dim + self.command_dim
+        self.hidden_batch_norm = bool(hidden_batch_norm)
 
         # IC fusion: concat(z, u) → Linear(257, 1024); concat width is not paper-specified.
+        # IC: BatchNorm1d after the hidden linear (BYOL/I-JEPA-style) to condition
+        # gradients under Table II SGD 0.2. Not a paper layer.
         self.fc_in = nn.Linear(self.input_dim, self.hidden_dim)
+        self.bn = nn.BatchNorm1d(self.hidden_dim) if self.hidden_batch_norm else nn.Identity()
         self.relu = nn.ReLU(inplace=True)
         self.fc_out = nn.Linear(self.hidden_dim, self.output_dim)
 
     def forward_mlp(self, x: torch.Tensor) -> torch.Tensor:
         if x.shape[-1] != self.input_dim:
             raise ValueError(f"predictor input dim must be {self.input_dim}, got {x.shape[-1]}")
-        return self.fc_out(self.relu(self.fc_in(x)))
+        return self.fc_out(self.relu(self.bn(self.fc_in(x))))
 
     def forward_step(self, embedding: torch.Tensor, command_norm: torch.Tensor) -> torch.Tensor:
         """
@@ -102,7 +107,12 @@ class Predictor(nn.Module):
             "input_dim": self.input_dim,
             "hidden_dim": self.hidden_dim,
             "output_dim": self.output_dim,
-            "stack": "Linear-1024-ReLU-Linear-256-L2Norm",
+            "stack": (
+                "Linear-1024-BN-ReLU-Linear-256-L2Norm"
+                if self.hidden_batch_norm
+                else "Linear-1024-ReLU-Linear-256-L2Norm"
+            ),
+            "hidden_batch_norm": self.hidden_batch_norm,
             "autoregressive": True,
             "detach_autoregressive_state": True,
             "inputs": "concat(embedding, command)",

@@ -703,8 +703,8 @@ Parameter counts (baseline, counted from constructed modules):
 |--------|------------|
 | Context encoder Ψθ | 4 880 192 |
 | Target encoder Ψθ̄ | 4 880 192 (frozen copy) |
-| Predictor Pφ | 526 592 |
-| JEPA trainable (θ + φ) | 5 406 784 |
+| Predictor Pφ | 528 640 |
+| JEPA trainable (θ + φ) | 5 408 832 |
 
 ## 5.1 Residual block (IC internals)
 
@@ -793,16 +793,18 @@ MLP, paper: hidden 1024, output 256, autoregressive, command-conditioned. Forbid
 - `command_dim == 1` (scalar cart-pole force)
 - `output_dim == embedding_dim`; both 256 unless Fig. 7 flag
 
-**Layers (ReLU, concat, width 257, output L2 are IC)**
+**Layers (ReLU, concat, width 257, hidden BN, output L2 are IC)**
 
 ```text
 x = concat(z, u_norm)          # [B, 257]
-h = ReLU(Linear(257, 1024))    # fc_in, bias=True (nn.Linear default)
+h = Linear(257, 1024)          # fc_in, bias=True (nn.Linear default)
+h = BatchNorm1d(1024)          # IC — not paper
+h = ReLU(h)
 ẑ = Linear(1024, 256)          # fc_out
 z̃ = F.normalize(ẑ, dim=-1, eps=1e-8)
 ```
 
-Params: `257×1024+1024 + 1024×256+256 = 526 592`.
+Params: `257×1024+1024 + 2×1024 + 1024×256+256 = 528 640`.
 
 **One step** `forward_step(embedding [B,D], command_norm [B] or [B,1])` → `[B, D]` unit vector.
 
@@ -907,6 +909,7 @@ Because both Ψ and Pφ L2-normalize, `cos_sim = z̃ · z̄` (unit vectors), but
 | Momentum | `0.0` | IC (Table II silent) |
 | Grad clip `‖g‖₂` | `1.0` | IC |
 | EMA η | `0.99` | paper |
+| LR warmup | 10 epochs, linear `0.02→0.2` | IC (`lr_warmup_epochs`) |
 | LR decay | `×0.99` every 20 epochs | paper |
 | Microbatch | `16` | IC (8 GB GPU) |
 | Accumulation | `256/16 = 16` | IC |
@@ -915,7 +918,7 @@ Because both Ψ and Pφ L2-normalize, `cos_sim = z̃ · z̄` (unit vectors), but
 
 Forbidden draft defaults (asserted in `assert_plan_jepa_training_config`): Adam/AdamW, LR `0.001`, WD `1e-5`, 200 epochs, EMA `0.996`.
 
-**LR schedule** (`should_apply_jepa_lr_decay`): after completing epoch `e` where `e > 0` and `e % 20 == 0`, multiply every param-group LR by `0.99`. Decays at epochs 20, 40, …, 140. After 150 epochs: `0.2 × 0.99^7`.
+**LR schedule** (`jepa_scheduled_lr`, applied at the start of each 1-indexed epoch): IC linear warmup for epochs 1–10 (`0.2 × epoch/10`), then Table II peak `0.2`. After warmup, decay `×0.99` every 20 *completed* epochs, so epoch 21 uses `0.2 × 0.99`. After 150 epochs the last decay count is 7 (`0.2 × 0.99^7`), same as Table II without counting warmup as extra decays. Warmup is not paper-specified.
 
 ## 6.4 Microbatch accumulation (IC)
 

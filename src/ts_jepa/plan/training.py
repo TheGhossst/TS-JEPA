@@ -23,6 +23,8 @@ PLAN_JEPA_TRAINING: dict[str, Any] = {
 
 # Table II does not specify SGD momentum. Baseline uses 0 (IC).
 IC_SGD_MOMENTUM = 0.0
+# Table II does not specify warmup. Linear warmup over this many epochs (IC).
+IC_LR_WARMUP_EPOCHS = 10
 
 # Plan §11 explicitly forbids generic BYOL/JEPA draft defaults.
 FORBIDDEN_JEPA_TRAINING_DEFAULTS: dict[str, Any] = {

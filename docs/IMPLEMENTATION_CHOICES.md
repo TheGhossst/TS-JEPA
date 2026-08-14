@@ -124,12 +124,13 @@ in baseline entry scripts (not inside the train loop — smoke tests may shrink 
 |-----------|-------|
 | Optimizer | SGD | Table II; momentum `0.0` is IC (not a paper number) |
 | Learning rate | `0.2` |
+| LR warmup | **10 epochs**, linear `0.02 → 0.2` (IC; Table II silent). Peak LR stays 0.2. |
 | Batch size | `256` (effective; microbatch accumulation is IC) |
 | Epochs | `150` |
 | Weight decay | `0.0004` on non-BN weights; **BN affine WD = 0** (IC) |
-| Grad clip | `1.0` (IC; Table II silent) |
+| Grad clip | `1.0` (IC; Table II silent). If EMA still desyncs after warmup, try `0.5` or `0.1`. |
 | EMA decay η | `0.99` |
-| LR schedule | ×`0.99` every `20` epochs |
+| LR schedule | warmup, then ×`0.99` every `20` epochs (decay is paper; warmup is IC) |
 | Kp / κ / emb | `15` / `2` / `256` |
 | Forbidden | Adam, LR=`0.001`, EMA=`0.996`, wd=`1e-5`, epochs=`200` |
 
@@ -194,12 +195,13 @@ JEPA checkpoints, `repetition_summary.json`, eval reports.
 
 Paper-specified: MLP hidden **1024**, output **256**, autoregressive, command-conditioned. No virtual-channel inputs.
 
-Hidden ReLU, concat, and input width 257 are IC.
+Hidden ReLU, concat, input width 257, and hidden BatchNorm1d are IC.
 
 | Component | Value |
 |-----------|-------|
 | Type | MLP |
-| Stack | `Linear(257→1024) → ReLU → Linear(1024→256) → L2-normalize` (ReLU, concat, and L2 are IC) |
+| Stack | `Linear(257→1024) → BatchNorm1d(1024) → ReLU → Linear(1024→256) → L2-normalize` (ReLU, concat, BN, and L2 are IC) |
+| Hidden BN | `BatchNorm1d` after the 1024-wide linear (IC). Conditions predictor grads under Table II SGD 0.2; not a paper layer. WD on this BN affine is 0 (same IC as encoder BN). |
 | Autoregressive | `z_{j+1} = normalize(Pφ(concat(z_j, u_j)))`; next input is `z_{j+1}.detach()` |
 | AR truncation | Detach between steps (IC). Paper Eq. (12) is still unrolled. Eq. (13) writes one-step cosine `ẑ_{k+1}`; 15-step BPTT is not specified and is unstable with Table II SGD 0.2. Encoder cosine matches the first step; Pφ is trained at every horizon step. |
 | Inputs | embedding + scalar control only |

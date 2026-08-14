@@ -12,6 +12,7 @@ from ts_jepa.config import load_config
 from ts_jepa.data.datasets import fit_command_normalizer
 from ts_jepa.data.trajectory_generator import build_env_and_teacher, generate_dataset_split
 from ts_jepa.runtime import load_checkpoint, save_checkpoint
+from ts_jepa.training.jepa_optimizer import jepa_scheduled_lr
 from ts_jepa.training.train_jepa import (
     train_ts_jepa,
     validate_checkpoint_config_compatibility,
@@ -132,21 +133,21 @@ def test_resume_restores_optimizer_state(tmp_path: Path):
         resume_from=runs / "last.pt",
     )
     resumed_ckpt = load_checkpoint(runs / "last.pt")
-    assert resumed_ckpt["optimizer"]["param_groups"][0]["lr"] == pytest.approx(
-        saved_optimizer["param_groups"][0]["lr"]
-    )
     assert len(resumed_ckpt["optimizer"]["state"]) == len(saved_optimizer["state"])
+    assert resumed_ckpt["optimizer"]["param_groups"][0]["lr"] == pytest.approx(
+        jepa_scheduled_lr(2, config)
+    )
 
 
-def test_resume_preserves_lr_not_reset_to_base(tmp_path: Path):
+def test_resume_applies_scheduled_lr_not_stale_checkpoint_lr(tmp_path: Path):
+    """IC warmup: resume uses jepa_scheduled_lr(epoch), not a hacked optimizer LR."""
     config = _tiny_config(tmp_path)
     root = _generate(config)
     runs = Path(config["paths"]["runs_root"]) / "ts_jepa" / "seed_0"
 
     train_ts_jepa(config, device=torch.device("cpu"), max_epochs=1, data_root=root, seed=0, run_dir=runs)
     ckpt = load_checkpoint(runs / "last.pt")
-    decayed_lr = float(config["ts_jepa"]["optimizer"]["learning_rate"]) * 0.99
-    ckpt["optimizer"]["param_groups"][0]["lr"] = decayed_lr
+    ckpt["optimizer"]["param_groups"][0]["lr"] = 0.198
     save_checkpoint(runs / "last.pt", ckpt)
 
     train_ts_jepa(
@@ -159,7 +160,9 @@ def test_resume_preserves_lr_not_reset_to_base(tmp_path: Path):
         resume_from=runs / "last.pt",
     )
     resumed = load_checkpoint(runs / "last.pt")
-    assert resumed["optimizer"]["param_groups"][0]["lr"] == pytest.approx(decayed_lr)
+    scheduled = jepa_scheduled_lr(2, config)
+    assert resumed["optimizer"]["param_groups"][0]["lr"] == pytest.approx(scheduled)
+    assert resumed["optimizer"]["param_groups"][0]["lr"] != pytest.approx(0.198)
     assert resumed["optimizer"]["param_groups"][0]["lr"] != pytest.approx(
         float(config["ts_jepa"]["optimizer"]["learning_rate"])
     )

@@ -163,6 +163,7 @@ ts_jepa:
     hidden_dim: 1024
     output_dim: 256
     activation: ReLU  # IC — plan §9 specifies 1024/256 MLP, not the hidden nonlinearity
+    hidden_batch_norm: true  # IC — BN after hidden linear; not paper; stabilizes Table II lr=0.2
     input_tensor_construction: concat_embedding_and_command  # IC — concat vs other fusion is NOT SPECIFIED
     autoregressive: true
     detach_autoregressive_state: true  # IC — Eq. (13) is one-step cosine; 15-step BPTT is not specified
@@ -194,6 +195,7 @@ ts_jepa:
   optimizer:  # plan §11 Table II — do not use Adam / LR=0.001 / EMA=0.996
     type: SGD
     learning_rate: 0.2
+    lr_warmup_epochs: 10  # IC — linear warmup 0.02→0.2; Table II is silent; stabilizes EMA under lr=0.2
     batch_size: 256  # paper effective batch; gradients accumulated to this size
     microbatch_size: 16  # IC — GPU memory; accumulation = batch_size / microbatch_size
     epochs: 150
