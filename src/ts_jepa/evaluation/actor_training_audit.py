@@ -276,10 +276,10 @@ def _runtime_embedding_parity(
         indices = sorted(rng.choice(n_steps, size=min(num_checks, n_steps), replace=False).tolist())
         cached = [pipeline.process_frame(frames[t], stochastic=False) for t in range(n_steps)]
         for time_index in indices:
-            ctx_dataset = cached[time_index].unsqueeze(0).to(device)
+            ctx_dataset = pipeline.assemble_jepa_input(cached, time_index).unsqueeze(0).to(device)
             with torch.no_grad():
                 z_dataset = jepa.encode_context(ctx_dataset).cpu().numpy().reshape(-1)
-            ctx_runtime = pipeline.make_jepa_frame(frames, time_index).unsqueeze(0).to(device)
+            ctx_runtime = pipeline.make_jepa_input(frames, time_index).unsqueeze(0).to(device)
             with torch.no_grad():
                 z_runtime = jepa.encode_context(ctx_runtime).cpu().numpy().reshape(-1)
             diff = float(np.max(np.abs(z_dataset - z_runtime)))

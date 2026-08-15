@@ -16,6 +16,12 @@ from ts_jepa.plan.baseline_validation import (
 )
 from ts_jepa.plan.encoder import PLAN_ENCODER, PLAN_TARGET_ENCODER, assert_plan_encoder_config
 from ts_jepa.plan.environment import PLAN_ENVIRONMENT, assert_plan_environment_config
+from ts_jepa.plan.enforce import (
+    is_working_mode,
+    jepa_in_channels,
+    jepa_uses_kappa_stack,
+    plan_enforced,
+)
 from ts_jepa.plan.loss import PLAN_JEPA_LOSS, assert_plan_jepa_loss_config
 from ts_jepa.plan.predictor import PLAN_PREDICTOR, assert_plan_predictor_config
 from ts_jepa.plan.preprocessing import (
@@ -61,4 +67,8 @@ __all__ = [
     "assert_plan_semantic_actor_training_config",
     "assert_plan_temporal_config",
     "assert_plan_wireless_config",
+    "is_working_mode",
+    "jepa_in_channels",
+    "jepa_uses_kappa_stack",
+    "plan_enforced",
 ]

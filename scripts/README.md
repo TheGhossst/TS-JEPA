@@ -13,6 +13,19 @@ CLI entry points for the TS-JEPA baseline. Run all commands from the repository 
 
 Root-level files such as `scripts/train_jepa.py` are thin wrappers that forward to `pipeline/` for backward compatibility.
 
+## Working overlay (not paper-faithful)
+
+**Config:** `configs/ts_jepa_working.yaml`  
+**Data:** `data_working/`  
+**Runs:** `runs/ts_jepa_working/`, `runs/semantic_actor_working/`  
+**Why:** see [`docs/WORKING.md`](../docs/WORKING.md)
+
+```powershell
+python scripts/pipeline/run_working.py --config configs/ts_jepa_working.yaml --device cuda
+```
+
+Default is JEPA+actor seed 0. Add `--all-seeds` for the 5-seed protocol.
+
 ## Full paper-scale pipeline
 
 **Config:** `configs/ts_jepa_dp_fixed.yaml`  

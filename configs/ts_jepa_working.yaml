@@ -1,0 +1,66 @@
+# Working (non-paper) overlay. Does not claim IEEE headline numbers.
+# Paper-faithful baseline remains configs/ts_jepa_baseline.yaml.
+_base: ts_jepa_baseline.yaml
+
+plan:
+  enforce: false
+  mode: working
+
+paths:
+  data_root: data_working
+  runs_root: runs
+  ts_jepa_dirname: ts_jepa_working
+  semantic_actor_dirname: semantic_actor_working
+
+simulation:
+  observation_stride_steps: 20  # 20 ms stored / control period; physics dt stays 0.001
+
+dataset_generation:
+  observation_stride_steps: 20
+
+control_teacher:
+  dp_substeps: 20  # one Bellman decision = one stored step (20 ms)
+
+environment:
+  jepa_observation: kappa_stack
+  context_tensor_shape: [6, 64, 128]
+
+temporal:
+  context_frames: "[x_{k-1}, x_k]"  # κ=2 channel-concat into Ψ
+
+ts_jepa:
+  encoder:
+    l2_normalize: false  # cosine still unit-normalizes inside the loss
+  predictor:
+    l2_normalize_output: false
+  optimizer:
+    type: AdamW
+    learning_rate: 0.0003  # 1e-3 overshot after warmup; EMA target lagged and cosine worsened
+    lr_warmup_epochs: 5
+    weight_decay: 0.0004
+    momentum: 0.0
+  loss:
+    paper_objective: cosine_similarity_alignment
+    implementation: negative_mean_cosine_similarity
+    # μ=25 is already the VICReg paper default. Do not ×5: logged vicreg_var is the
+    # hinge, not embedding std. ν=5 targets the rising off-diagonal covariance.
+    vicreg_variance_weight: 25.0
+    vicreg_covariance_weight: 5.0
+    vicreg_gamma: 1.0
+  training_procedure:
+    steps:
+      - context_encoding
+      - target_encoding_stop_gradient
+      - autoregressive_prediction
+      - jepa_loss
+      - adamw_update_theta_phi
+      - ema_update_target
+
+evaluation:
+  working_gates:
+    predictor_cosine_plus20_minus20_max: 0.95
+    predictor_l2_plus20_minus20_min: 0.2
+    encoder_effective_rank_min: 8.0
+    actor_must_beat_mean_command: true
+    closed_loop_must_beat_hold_and_zero: true
+    closed_loop_seeds: [100, 101, 102]

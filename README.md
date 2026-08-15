@@ -6,6 +6,12 @@ Reproduction of **Time-Series JEPA** for predictive remote control under capacit
 
 GE-JEPA / burst channels are excluded; they are not in the paper.
 
+The published 1 ms + cosine-only recipe identity-collapses the predictor. For a **working** (non-paper) controller, use [`configs/ts_jepa_working.yaml`](configs/ts_jepa_working.yaml) and [`docs/WORKING.md`](docs/WORKING.md):
+
+```powershell
+python scripts/pipeline/run_working.py --config configs/ts_jepa_working.yaml --device cuda
+```
+
 Run every command below from the **repository root** after a fresh clone.
 
 ## Environment and setup

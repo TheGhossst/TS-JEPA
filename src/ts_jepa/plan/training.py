@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ts_jepa.plan.enforce import plan_enforced
+
 PLAN_JEPA_TRAINING: dict[str, Any] = {
     "optimizer_type": "SGD",
     "learning_rate": 0.2,
@@ -43,6 +45,8 @@ def assert_plan_jepa_training_config(config: dict[str, Any]) -> None:
     Call from baseline entry scripts only. Smoke tests may override batch_size / Kp /
     epochs; do not call this from TSJEPA.__init__ or the train loop body.
     """
+    if not plan_enforced(config):
+        return
     errors: list[str] = []
     opt = config.get("ts_jepa", {}).get("optimizer", {})
     lr_decay = config.get("ts_jepa", {}).get("lr_decay", {})

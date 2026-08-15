@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ts_jepa.plan.enforce import plan_enforced
+
 # Plan §16 paper-specified baseline *names* (not architectures).
 PLAN_CONTROL_BASELINES = (
     "optimal_nonlinear_dp",
@@ -45,6 +47,8 @@ def assert_plan_section_16_17_config(config: dict[str, Any]) -> None:
 
     Does not freeze Fig. 7/8/10/11 numeric grids (plan §18).
     """
+    if not plan_enforced(config):
+        return
     errors: list[str] = []
     snr = list(config.get("wireless", {}).get("snr_targets_db", []))
     if snr != [5, 10, 20]:

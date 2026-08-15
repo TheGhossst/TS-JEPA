@@ -58,3 +58,28 @@ def cosine_alignment_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Ten
     easier to log (0 = perfect alignment). Config may record either implementation.
     """
     return 1.0 + jepa_loss(pred, target)
+
+
+def vicreg_variance_loss(z: torch.Tensor, gamma: float = 1.0, eps: float = 1e-4) -> torch.Tensor:
+    """
+    VICReg variance hinge on a batch of embeddings [B, D].
+
+    Applied to raw (pre-normalize) context embeddings. gamma=1 is not achievable
+    on an L2-normalized 256-D sphere.
+    """
+    if z.ndim != 2:
+        raise ValueError(f"vicreg_variance_loss expects [B, D], got {tuple(z.shape)}")
+    std = torch.sqrt(z.var(dim=0) + eps)
+    return torch.mean(F.relu(float(gamma) - std))
+
+
+def vicreg_covariance_loss(z: torch.Tensor) -> torch.Tensor:
+    """VICReg off-diagonal covariance penalty on embeddings [B, D]."""
+    if z.ndim != 2:
+        raise ValueError(f"vicreg_covariance_loss expects [B, D], got {tuple(z.shape)}")
+    batch, dim = z.shape
+    zc = z - z.mean(dim=0)
+    denom = max(batch - 1, 1)
+    cov = (zc.T @ zc) / denom
+    off = cov.pow(2).sum() - cov.diag().pow(2).sum()
+    return off / dim

@@ -15,6 +15,7 @@ from ts_jepa.data.temporal import (
     predicted_command_indices,
     target_end_indices,
 )
+from ts_jepa.plan.enforce import jepa_uses_kappa_stack
 from ts_jepa.preprocessing.command_stats import CommandNormalizer
 from ts_jepa.preprocessing.pipeline import PreprocessPipeline
 
@@ -46,9 +47,9 @@ class TrajectoryDataset(Dataset):
     Dataset over trajectory time steps for TS-JEPA training.
 
     Algorithm 1 sample at time index k:
-      context:  single RGB frame x_k           → [3, 64, 128]
+      context:  RGB frame x_k, or κ-stack when jepa_observation=kappa_stack
       controls: u_k .. u_{k+Kp-1}             → teacher_commands[Kp]
-      targets:  frames x_{k+1} .. x_{k+Kp}    → future_frames[Kp, 3, H, W]
+      targets:  frames (or κ-stacks) at k+1 .. k+Kp
     """
 
     def __init__(
@@ -102,14 +103,17 @@ class TrajectoryDataset(Dataset):
         if self._eval_cache[file_idx] is not None:
             processed = {t: self._eval_cache[file_idx][t] for t in range(frames.shape[0])}
         else:
+            kappa = int(self.config["input"]["kappa"])
             start = time_index
+            if jepa_uses_kappa_stack(self.config):
+                start = max(0, time_index - kappa + 1)
             end = time_index + self.kp
             processed = self.pipeline.process_frames_cached(frames, start, end, stochastic=self.training)
 
-        context = self.pipeline.assemble_jepa_frame(processed, time_index)
+        context = self.pipeline.assemble_jepa_input(processed, time_index)
         future_stack = torch.stack(
             [
-                self.pipeline.assemble_jepa_frame(processed, end_t)
+                self.pipeline.assemble_jepa_input(processed, end_t)
                 for end_t in target_end_indices(time_index, self.kp)
             ],
             dim=0,
@@ -171,7 +175,7 @@ class ActorEmbeddingDataset(Dataset):
                 batch_cmds_phys = []
                 batch_cmds_norm = []
                 for time_index in range(len(commands)):
-                    batch_contexts.append(cached[time_index])
+                    batch_contexts.append(self.pipeline.assemble_jepa_input(cached, time_index))
                     phys = float(commands[time_index])
                     batch_cmds_phys.append(phys)
                     batch_cmds_norm.append(

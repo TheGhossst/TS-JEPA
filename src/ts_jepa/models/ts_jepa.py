@@ -20,6 +20,7 @@ from ts_jepa.models.predictor_command_resolution import (
     load_predictor_command_resolution,
 )
 from ts_jepa.models.predictor import Predictor
+from ts_jepa.plan.enforce import jepa_in_channels
 
 
 class TSJEPA(nn.Module):
@@ -30,12 +31,10 @@ class TSJEPA(nn.Module):
         assert_plan_encoder_config(config)
         assert_plan_predictor_config(config)
         assert_plan_predictor_command_resolution(config)
-        inp = config["input"]
         enc_cfg = config["ts_jepa"]["encoder"]
         pred_cfg = config["ts_jepa"]["predictor"]
-        # Algorithm 1: Ψ(x_{i,k}) on one RGB frame (3 channels). κ concat is for
-        # supervised / AE baselines only (Section IV.D.3).
-        in_channels = int(inp["channels_per_rgb_frame"])
+        loss_cfg = config["ts_jepa"].get("loss", {})
+        in_channels = jepa_in_channels(config)
         embedding_dim = int(enc_cfg["embedding_dim"])
         strict_dim = not bool(config.get("experiments", {}).get("allow_non_baseline_embedding_dim", False))
         self.context_encoder = ContextEncoder(
@@ -45,6 +44,7 @@ class TSJEPA(nn.Module):
             blocks_per_stage=int(enc_cfg.get("blocks_per_stage", 2)),
             spatial_pool_hw=tuple(enc_cfg.get("spatial_pool_hw", [4, 8])),
             strict_baseline_dim=strict_dim,
+            l2_normalize=bool(enc_cfg.get("l2_normalize", True)),
         )
         self.target_encoder = initialize_target_from_context(self.context_encoder)
         assert_target_initialized_from_context(self.context_encoder, self.target_encoder)
@@ -55,11 +55,15 @@ class TSJEPA(nn.Module):
             output_dim=int(pred_cfg["output_dim"]),
             hidden_batch_norm=bool(pred_cfg.get("hidden_batch_norm", True)),
             strict_baseline_dim=strict_dim,
+            l2_normalize_output=bool(pred_cfg.get("l2_normalize_output", True)),
         )
         self.command_source = str(pred_cfg.get("command_source", "teacher_dp"))
         self.command_resolution: PredictorCommandResolution = load_predictor_command_resolution(config)
         self.ema_decay = float(config["ts_jepa"]["target_encoder"]["ema_decay"])
         self.kp = int(config["ts_jepa"]["prediction_horizon"]["Kp"])
+        self.vicreg_variance_weight = float(loss_cfg.get("vicreg_variance_weight", 0.0) or 0.0)
+        self.vicreg_covariance_weight = float(loss_cfg.get("vicreg_covariance_weight", 0.0) or 0.0)
+        self.vicreg_gamma = float(loss_cfg.get("vicreg_gamma", 1.0) or 1.0)
 
     def train(self, mode: bool = True) -> TSJEPA:
         """Keep Ψθ̄ in eval. Plan §8: target is stop-grad + EMA, not a trained BN branch."""
@@ -75,7 +79,7 @@ class TSJEPA(nn.Module):
         """
         Plan §8: target encoder forward with stop-gradient.
 
-        future_frames: [B, Kp, 3, H, W] → [B, Kp, D] (one RGB frame per target step).
+        future_frames: [B, Kp, C, H, W] → [B, Kp, D] (C=3 paper; C=6 κ-stack working).
         """
         self.target_encoder.eval()
         b, kp, c, h, w = future_frames.shape

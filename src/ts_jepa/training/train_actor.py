@@ -203,6 +203,7 @@ def _train_semantic_actor_body(
         shuffle=False,
         device=device,
         config=config,
+        num_workers=0,
     )
     test_loader = make_dataloader(
         test_ds,
@@ -210,6 +211,7 @@ def _train_semantic_actor_body(
         shuffle=False,
         device=device,
         config=config,
+        num_workers=0,
     )
 
     epochs = int(max_epochs if max_epochs is not None else opt_cfg["epochs"])

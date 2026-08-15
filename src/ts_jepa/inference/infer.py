@@ -128,7 +128,7 @@ class FrozenRuntimeController:
     def _context_from_buffer(self) -> torch.Tensor:
         frames = np.stack(self.frame_buffer, axis=0)
         t = len(frames) - 1
-        context = self.pipeline.make_jepa_frame(frames, t)
+        context = self.pipeline.make_jepa_input(frames, t)
         return context.unsqueeze(0).to(self.device)
 
     def observe_frame(self, frame: np.ndarray) -> None:

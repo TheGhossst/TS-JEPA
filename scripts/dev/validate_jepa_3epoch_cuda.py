@@ -487,6 +487,7 @@ def main() -> None:
         device=device,
         config=config,
         drop_last=False,
+        num_workers=0,
     )
     n_effective, n_micros_used, n_leftover = accumulation_plan(len(train_loader), accum_steps)
     log(

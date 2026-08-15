@@ -48,6 +48,7 @@ class ContextEncoder(nn.Module):
         spatial_pool_hw: tuple[int, int] | list[int] = (4, 8),
         *,
         strict_baseline_dim: bool = True,
+        l2_normalize: bool = True,
     ) -> None:
         super().__init__()
         if tuple(widths) != (64, 128, 256):
@@ -63,6 +64,7 @@ class ContextEncoder(nn.Module):
         self.embedding_dim = int(embedding_dim)
         self.blocks_per_stage = int(blocks_per_stage)
         self.spatial_pool_hw = (int(spatial_pool_hw[0]), int(spatial_pool_hw[1]))
+        self.l2_normalize = bool(l2_normalize)
         if self.spatial_pool_hw[0] < 1 or self.spatial_pool_hw[1] < 1:
             raise ValueError(f"spatial_pool_hw must be positive, got {self.spatial_pool_hw}")
 
@@ -96,7 +98,10 @@ class ContextEncoder(nn.Module):
         x = self.stage128(x)
         x = self.stage256(x)
         x = self.global_pool(x).flatten(1)
-        return F.normalize(self.projection(x), dim=-1, eps=1e-8)
+        z = self.projection(x)
+        if self.l2_normalize:
+            return F.normalize(z, dim=-1, eps=1e-8)
+        return z
 
     def architecture_summary(self) -> dict[str, object]:
         return {
@@ -106,9 +111,13 @@ class ContextEncoder(nn.Module):
             "blocks_per_stage": self.blocks_per_stage,
             "stem": "Conv7x7s2-BN-ReLU-MaxPool3x3s2",
             "stages": ["64", "128@s2", "256@s2"],
-            "head": "SpatialPool-Flatten-Linear-L2Norm",
+            "head": (
+                "SpatialPool-Flatten-Linear-L2Norm"
+                if self.l2_normalize
+                else "SpatialPool-Flatten-Linear"
+            ),
             "spatial_pool_hw": list(self.spatial_pool_hw),
-            "l2_normalize": True,
+            "l2_normalize": self.l2_normalize,
         }
 
 

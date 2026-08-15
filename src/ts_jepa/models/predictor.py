@@ -24,6 +24,7 @@ class Predictor(nn.Module):
         *,
         hidden_batch_norm: bool = True,
         strict_baseline_dim: bool = True,
+        l2_normalize_output: bool = True,
     ) -> None:
         super().__init__()
         if int(hidden_dim) != 1024:
@@ -45,6 +46,7 @@ class Predictor(nn.Module):
         self.output_dim = out_dim
         self.input_dim = self.embedding_dim + self.command_dim
         self.hidden_batch_norm = bool(hidden_batch_norm)
+        self.l2_normalize_output = bool(l2_normalize_output)
 
         # IC fusion: concat(z, u) → Linear(257, 1024); concat width is not paper-specified.
         # IC: BatchNorm1d after the hidden linear (BYOL/I-JEPA-style) to condition
@@ -72,8 +74,10 @@ class Predictor(nn.Module):
         x = torch.cat([embedding, command_norm], dim=-1)
         if x.shape[-1] != self.input_dim:
             raise ValueError(f"predictor input dim must be {self.input_dim}, got {x.shape[-1]}")
-        # IC: same unit-sphere geometry as Ψ (cosine Eq. 13). Not a paper layer.
-        return F.normalize(self.forward_mlp(x), dim=-1, eps=1e-8)
+        out = self.forward_mlp(x)
+        if self.l2_normalize_output:
+            return F.normalize(out, dim=-1, eps=1e-8)
+        return out
 
     def forward(
         self,
@@ -113,6 +117,7 @@ class Predictor(nn.Module):
                 else "Linear-1024-ReLU-Linear-256-L2Norm"
             ),
             "hidden_batch_norm": self.hidden_batch_norm,
+            "l2_normalize_output": self.l2_normalize_output,
             "autoregressive": True,
             "detach_autoregressive_state": True,
             "inputs": "concat(embedding, command)",

@@ -14,6 +14,8 @@ from typing import Any
 
 import torch
 
+from ts_jepa.plan.enforce import plan_enforced
+
 # Plan §9 candidate mechanisms (evaluate separately; do not merge without ablation).
 COMMAND_SOURCE_CANDIDATES: tuple[str, ...] = (
     "teacher_dp",
@@ -120,6 +122,8 @@ def assert_plan_predictor_command_resolution(config: dict[str, Any]) -> None:
       - predictor.command_source disagrees with resolution block
       - selected source is not implemented in this codebase
     """
+    if not plan_enforced(config):
+        return
     resolution = load_predictor_command_resolution(config)
     pred_source = str(config.get("ts_jepa", {}).get("predictor", {}).get("command_source", ""))
     block = _resolution_block(config)

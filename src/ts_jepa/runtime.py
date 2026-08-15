@@ -77,6 +77,41 @@ def resolve_num_workers(config: dict[str, Any] | None, device: torch.device) -> 
     return 4
 
 
+def is_dataloader_spawn_error(exc: BaseException) -> bool:
+    """True when Windows spawn failed while pickling a DataLoader worker payload."""
+    cur: BaseException | None = exc
+    seen = 0
+    needles = (
+        "invalid argument",
+        "pickle data was truncated",
+        "unpicklingerror",
+        "too many open files",
+        "cannot pickle",
+    )
+    while cur is not None and seen < 8:
+        errno = getattr(cur, "errno", None)
+        if isinstance(cur, OSError) and errno in {12, 22, 24}:
+            return True
+        text = f"{type(cur).__name__}: {cur}".lower()
+        if any(needle in text for needle in needles):
+            return True
+        cur = cur.__cause__ or cur.__context__
+        seen += 1
+    return False
+
+
+def inprocess_dataloader(loader: DataLoader) -> DataLoader:
+    """Rebuild a loader that never spawns workers (Windows-safe eval)."""
+    return DataLoader(
+        loader.dataset,
+        batch_size=loader.batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=False,
+        drop_last=bool(loader.drop_last),
+    )
+
+
 def make_dataloader(
     dataset: Dataset,
     *,
@@ -85,10 +120,11 @@ def make_dataloader(
     device: torch.device,
     config: dict[str, Any] | None = None,
     drop_last: bool = False,
+    num_workers: int | None = None,
 ) -> DataLoader:
     """DataLoader tuned for overlapping CPU preprocess with GPU compute."""
     runtime = (config or {}).get("runtime", {})
-    num_workers = resolve_num_workers(config, device)
+    workers = resolve_num_workers(config, device) if num_workers is None else max(0, int(num_workers))
     pin_memory = bool(runtime.get("pin_memory", device.type == "cuda"))
     prefetch = int(runtime.get("prefetch_factor", 2))
     # Avoid infinite hangs when a Windows spawn worker dies/deadlocks mid-epoch.
@@ -97,11 +133,11 @@ def make_dataloader(
         "dataset": dataset,
         "batch_size": batch_size,
         "shuffle": shuffle,
-        "num_workers": num_workers,
+        "num_workers": workers,
         "drop_last": drop_last,
-        "pin_memory": pin_memory and device.type == "cuda",
+        "pin_memory": pin_memory and device.type == "cuda" and workers > 0,
     }
-    if num_workers > 0:
+    if workers > 0:
         kwargs["persistent_workers"] = bool(runtime.get("persistent_workers", True))
         kwargs["prefetch_factor"] = max(2, prefetch)
         kwargs["worker_init_fn"] = _worker_init_fn
@@ -162,7 +198,17 @@ class CUDAPrefetcher:
             return
 
         stream = torch.cuda.Stream()
-        it = iter(self.loader)
+        try:
+            it = iter(self.loader)
+        except Exception as exc:
+            self.last_error = exc
+            raise DataLoaderStallError(
+                f"DataLoader iterator failed to start after {self.batches_yielded} batches "
+                f"({type(exc).__name__}: {exc}). "
+                "On Windows, spawning val/test workers while train persistent_workers still "
+                "hold TrajectoryDataset RGB arrays often raises OSError 22 / truncated pickle. "
+                "Use num_workers=0 for eval loaders."
+            ) from exc
         next_batch: dict[str, Any] | None
 
         def _preload() -> dict[str, Any] | None:

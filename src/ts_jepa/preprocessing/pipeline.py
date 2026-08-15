@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from ts_jepa.preprocessing.plan import EVAL_PIPELINE_STAGES, TRAINING_PIPELINE_STAGES
+from ts_jepa.plan.enforce import jepa_uses_kappa_stack
 
 
 class PreprocessPipeline:
@@ -171,6 +172,18 @@ class PreprocessPipeline:
         if self.construction != "channel_concat":
             raise ValueError(f"Unsupported multi_frame_tensor_construction: {self.construction}")
         return torch.cat(selected, dim=0)
+
+    def assemble_jepa_input(self, processed: dict[int, torch.Tensor], time_index: int) -> torch.Tensor:
+        """Encoder tensor at time k: one RGB frame (paper) or κ-stack (working)."""
+        if jepa_uses_kappa_stack(self.config):
+            return self.assemble_context(processed, time_index)
+        return self.assemble_jepa_frame(processed, time_index)
+
+    def make_jepa_input(self, frames: np.ndarray, time_index: int) -> torch.Tensor:
+        """Encode-ready Ψ input at time k (single frame or κ-stack)."""
+        if jepa_uses_kappa_stack(self.config):
+            return self.make_context_tensor(frames, time_index)
+        return self.make_jepa_frame(frames, time_index)
 
     def make_jepa_frame(self, frames: np.ndarray, time_index: int) -> torch.Tensor:
         """Encode-ready single frame x_k (Algorithm 1)."""

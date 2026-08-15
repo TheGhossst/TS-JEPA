@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ts_jepa.plan.enforce import plan_enforced
+
 # Paper Table IV + plan §13 SNR thresholds (paper-specified).
 PLAN_WIRELESS: dict[str, Any] = {
     "scenario": "InF-SH",
@@ -42,6 +44,8 @@ def assert_plan_wireless_config(config: dict[str, Any]) -> None:
 
     Does not hard-assert IMPLEMENTATION CHOICE scalars (J, I, V, β_th, p_max).
     """
+    if not plan_enforced(config):
+        return
     errors: list[str] = []
     w = config.get("wireless", {})
     if not w:

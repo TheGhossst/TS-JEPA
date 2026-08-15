@@ -40,25 +40,27 @@ def jepa_sgd_param_groups(model: TSJEPA, weight_decay: float) -> list[dict[str, 
     return groups
 
 
-def build_jepa_optimizer(model: TSJEPA, config: dict[str, Any]) -> torch.optim.SGD:
+def build_jepa_optimizer(model: TSJEPA, config: dict[str, Any]) -> torch.optim.Optimizer:
     """
-    Build SGD optimizer for context encoder + predictor (plan §11).
+    Build optimizer for context encoder + predictor (plan §11 SGD; working overlay AdamW).
 
     Does not call assert_plan_jepa_training_config — smoke tests may override
     batch_size / Kp / epochs. Baseline scripts assert plan values before training.
     Target encoder Ψθ̄ is updated via EMA only (plan §8 / §10 Algorithm 1 step 6).
     """
+    from ts_jepa.plan.enforce import is_working_mode
+
     opt_cfg = config["ts_jepa"]["optimizer"]
     opt_type = str(opt_cfg.get("type", "SGD"))
-    if opt_type != "SGD":
-        raise ValueError(
-            f"plan §11 requires SGD for TS-JEPA (not Adam/BYOL defaults); got {opt_type!r}"
-        )
-    momentum = float(opt_cfg.get("momentum", IC_SGD_MOMENTUM))
-    return torch.optim.SGD(
-        jepa_sgd_param_groups(model, float(opt_cfg["weight_decay"])),
-        lr=float(opt_cfg["learning_rate"]),
-        momentum=momentum,
+    groups = jepa_sgd_param_groups(model, float(opt_cfg["weight_decay"]))
+    lr = float(opt_cfg["learning_rate"])
+    if opt_type == "SGD":
+        momentum = float(opt_cfg.get("momentum", IC_SGD_MOMENTUM))
+        return torch.optim.SGD(groups, lr=lr, momentum=momentum)
+    if opt_type in {"AdamW", "adamw"} and is_working_mode(config):
+        return torch.optim.AdamW(groups, lr=lr)
+    raise ValueError(
+        f"plan §11 requires SGD for TS-JEPA (not Adam/BYOL defaults); got {opt_type!r}"
     )
 
 

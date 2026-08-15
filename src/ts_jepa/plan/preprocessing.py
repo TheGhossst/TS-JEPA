@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ts_jepa.plan.enforce import plan_enforced
+
 # Paper-faithful values from docs/plan.md §5. Follow the numbered training list;
 # do not insert extra stages.
 PLAN_PREPROCESSING: dict[str, Any] = {
@@ -32,6 +34,8 @@ EVAL_PIPELINE_STAGES = ("normalization", "resize")
 
 def assert_plan_preprocessing_config(config: dict[str, Any]) -> None:
     """Raise ValueError when config input/preprocessing deviates from plan §5."""
+    if not plan_enforced(config):
+        return
     inp = config.get("input", {})
     errors: list[str] = []
 

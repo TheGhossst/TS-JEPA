@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ts_jepa.plan.enforce import plan_enforced
+
 STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
 STATUS_INCOMPLETE = "INCOMPLETE"
@@ -39,6 +41,8 @@ PLAN_BASELINE_VALIDATION: dict[str, Any] = {
 
 def assert_plan_baseline_validation_config(config: dict[str, Any]) -> None:
     """Raise when evaluation config cannot support plan §15 metrics."""
+    if not plan_enforced(config):
+        return
     errors: list[str] = []
     ev = config.get("evaluation", {})
     bv = ev.get("baseline_validation", {})

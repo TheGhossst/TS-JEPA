@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ts_jepa.plan.enforce import plan_enforced
+
 # PAPER-SPECIFIED only. Native camera size, Gym vs custom backend, and how
 # κ frames are stacked are NOT SPECIFIED — see docs/IMPLEMENTATION_CHOICES.md.
 PLAN_ENVIRONMENT: dict[str, Any] = {
@@ -25,6 +27,8 @@ PLAN_ENVIRONMENT: dict[str, Any] = {
 
 def assert_plan_environment_config(config: dict[str, Any]) -> None:
     """Raise ValueError when environment settings deviate from plan §2–§3."""
+    if not plan_enforced(config):
+        return
     errors: list[str] = []
     sim = config.get("simulation", {})
     inp = config.get("input", {})

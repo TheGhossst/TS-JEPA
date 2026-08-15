@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ts_jepa.plan.enforce import plan_enforced
+
 # PAPER-SPECIFIED: ResNet widths 64/128/256 with BN and ReLU after each.
 # Stem, pooling, block counts, and the embedding head are NOT SPECIFIED.
 PLAN_ENCODER: dict[str, Any] = {
@@ -25,6 +27,8 @@ PLAN_TARGET_ENCODER: dict[str, Any] = {
 
 def assert_plan_encoder_config(config: dict[str, Any]) -> None:
     """Raise ValueError when encoder / target-encoder config deviates from plan §7–§8."""
+    if not plan_enforced(config):
+        return
     enc = config.get("ts_jepa", {}).get("encoder", {})
     tgt = config.get("ts_jepa", {}).get("target_encoder", {})
     errors: list[str] = []

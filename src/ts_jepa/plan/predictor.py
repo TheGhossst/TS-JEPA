@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ts_jepa.plan.enforce import plan_enforced
+
 PLAN_PREDICTOR: dict[str, Any] = {
     "type": "MLP",
     "hidden_dim": 1024,
@@ -25,6 +27,8 @@ IC_PREDICTOR_HIDDEN_BATCH_NORM = True
 
 def assert_plan_predictor_config(config: dict[str, Any]) -> None:
     """Raise ValueError when predictor settings deviate from plan §9."""
+    if not plan_enforced(config):
+        return
     pred = config.get("ts_jepa", {}).get("predictor", {})
     errors: list[str] = []
 

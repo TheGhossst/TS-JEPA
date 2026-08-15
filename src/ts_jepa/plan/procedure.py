@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ts_jepa.plan.enforce import plan_enforced
+
 PLAN_JEPA_PROCEDURE: dict[str, Any] = {
     "steps": (
         "context_encoding",
@@ -28,6 +30,8 @@ def assert_plan_jepa_procedure_config(config: dict[str, Any]) -> None:
 
     Call from baseline entry scripts. Does not enforce batch/Kp (smoke-safe).
     """
+    if not plan_enforced(config):
+        return
     errors: list[str] = []
     jepa = config.get("ts_jepa", {})
     opt = jepa.get("optimizer", {})

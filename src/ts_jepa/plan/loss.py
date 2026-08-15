@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ts_jepa.plan.enforce import plan_enforced
+
 PLAN_JEPA_LOSS: dict[str, Any] = {
     "paper_objective": "cosine_similarity_alignment",
     "formula": "L_JEPA = -(1/Kp) * sum_{j=1}^{Kp} cos_sim(z_pred_j, z_target_j)",
@@ -23,6 +25,8 @@ FORBIDDEN_JEPA_LOSS_OBJECTIVES = frozenset(
 
 def assert_plan_jepa_loss_config(config: dict[str, Any]) -> None:
     """Raise ValueError when JEPA loss settings deviate from plan §10."""
+    if not plan_enforced(config):
+        return
     loss = config.get("ts_jepa", {}).get("loss", {})
     target_enc = config.get("ts_jepa", {}).get("target_encoder", {})
     errors: list[str] = []
@@ -55,7 +59,15 @@ def assert_plan_jepa_loss_config(config: dict[str, Any]) -> None:
         errors.append(
             f"ts_jepa.loss.forbidden_aux_losses: expected {list(expected_forbidden)}, got {list(forbidden)}"
         )
-    for key in ("vicreg", "reconstruction", "aux_loss", "reconstruction_weight", "vicreg_weight"):
+    for key in (
+        "vicreg",
+        "reconstruction",
+        "aux_loss",
+        "reconstruction_weight",
+        "vicreg_weight",
+        "vicreg_variance_weight",
+        "vicreg_covariance_weight",
+    ):
         if key in loss and loss[key] not in (None, 0, 0.0, False, []):
             errors.append(f"ts_jepa.loss.{key} is forbidden (plan §10 cosine-only objective)")
 

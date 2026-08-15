@@ -64,6 +64,7 @@ class DPControlTeacher:
         value_iteration_iters: int = 300,
         desired_state: list[float] | None = None,
         dp_substeps: int = 1,
+        allow_non_unit_substeps: bool = False,
     ) -> None:
         self.env = env
         self.grid = DPGrid.from_config(grid)
@@ -72,7 +73,9 @@ class DPControlTeacher:
         self.discount = float(discount)
         self.value_iteration_iters = int(value_iteration_iters)
         self.dp_substeps = int(dp_substeps)
-        if self.dp_substeps != 1:
+        if self.dp_substeps < 1:
+            raise ValueError(f"dp_substeps must be >= 1, got {self.dp_substeps}")
+        if self.dp_substeps != 1 and not allow_non_unit_substeps:
             raise ValueError(
                 f"dp_substeps must be 1 so one Bellman transition equals one τ_o "
                 f"physics step (Eq. 2 subject to Eq. 1); got {self.dp_substeps}"
@@ -176,7 +179,7 @@ class DPControlTeacher:
         self, states: np.ndarray, force: float
     ) -> tuple[np.ndarray, np.ndarray]:
         """
-        Hold `force` for one τ_o physics step (dp_substeps=1).
+        Hold `force` for ``dp_substeps`` physics ticks (paper: 1; working: 20).
 
         Stage cost (IC numerics; one-step structure follows Eq. 3's per-k term):
           0.5 ||s_{k+1} - s*||^2   +   0.5 R u^2

@@ -10,6 +10,7 @@ from ts_jepa.control.dp_teacher import DPControlTeacher
 from ts_jepa.env.cartpole_rgb import InvertedCartPoleEnv
 from ts_jepa.env.factory import build_inverted_cartpole_env
 from ts_jepa.env.renderer import sample_appearance
+from ts_jepa.plan.enforce import is_working_mode, plan_enforced
 from ts_jepa.plan.environment import assert_plan_environment_config
 from ts_jepa.plan.preprocessing import assert_plan_preprocessing_config
 
@@ -42,6 +43,8 @@ class UniformRandomControlTeacher:
 
 def assert_plan_simulation_timing(config: dict[str, Any]) -> None:
     """Plan §4: τ_o = 1 ms sampling period. DP Bellman step equals that τ_o."""
+    if not plan_enforced(config):
+        return
     sim = config["simulation"]
     tau_ms = float(sim["sampling_interval_ms"])
     dt = float(sim["dt"])
@@ -86,6 +89,8 @@ def dataset_split_index_plan(config: dict[str, Any]) -> dict[str, tuple[int, int
 
 def assert_plan_dataset_counts(config: dict[str, Any]) -> None:
     """Plan §4: D_s 200/40, D_a 100/20, 100 steps per trajectory."""
+    if not plan_enforced(config):
+        return
     steps = int(config["simulation"]["trajectory_steps"])
     if steps != 100:
         raise ValueError(f"simulation.trajectory_steps must be 100 per plan §4, got {steps}")
@@ -138,6 +143,7 @@ def build_env_and_teacher(config: dict[str, Any]) -> tuple[InvertedCartPoleEnv, 
         value_iteration_iters=teacher_cfg["value_iteration_iters"],
         desired_state=sim["desired_state"],
         dp_substeps=int(teacher_cfg.get("dp_substeps", 1)),
+        allow_non_unit_substeps=is_working_mode(config),
     )
     return env, teacher
 

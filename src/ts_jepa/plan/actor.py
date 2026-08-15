@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ts_jepa.plan.enforce import plan_enforced
+
 # Plan §12 architecture: embedding → Linear 1024 → ReLU → Linear 256 → ReLU → Linear 1
 # Output nonlinearity is NOT SPECIFIED (plan §18); see IC_ACTOR_OUTPUT_ACTIVATION.
 PLAN_SEMANTIC_ACTOR: dict[str, Any] = {
@@ -50,6 +52,8 @@ def assert_plan_semantic_actor_config(config: dict[str, Any]) -> None:
     Smoke tests may shrink dims; do not call this from SemanticActor.__init__
     when overrides are intentional.
     """
+    if not plan_enforced(config):
+        return
     errors: list[str] = []
     actor = config.get("semantic_actor", {})
     arch = actor.get("architecture", {})
@@ -116,6 +120,8 @@ def assert_plan_semantic_actor_training_config(config: dict[str, Any]) -> None:
     Call from baseline entry scripts only. Smoke tests may override batch_size /
     epochs / early_stopping; do not call this from the train loop body.
     """
+    if not plan_enforced(config):
+        return
     errors: list[str] = []
     actor = config.get("semantic_actor", {})
     arch = actor.get("architecture", {})
