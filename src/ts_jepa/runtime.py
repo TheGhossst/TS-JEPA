@@ -59,11 +59,13 @@ def configure_training_runtime(
         except Exception:
             pass
     info["allow_tf32"] = bool(allow_tf32)
-    # Reduce fragmentation on 8 GB WDDM laptops.
-    try:
-        torch.cuda.set_per_process_memory_fraction(0.95)
-    except Exception:
-        pass
+    # Do not set_per_process_memory_fraction: on 8 GB WDDM the caching allocator
+    # then keeps almost the whole card reserved while live alloc stays small.
+    alloc_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+    if "expandable_segments" not in alloc_conf:
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = (
+            (alloc_conf + "," if alloc_conf else "") + "expandable_segments:True"
+        )
     return info
 
 
@@ -171,12 +173,36 @@ def gpu_mem_str(device: torch.device) -> str:
     try:
         free_b, total_b = torch.cuda.mem_get_info(device)
         alloc = torch.cuda.memory_allocated(device)
+        reserved = torch.cuda.memory_reserved(device)
         return (
             f"alloc={alloc / 1e9:.2f}GB "
+            f"reserved={reserved / 1e9:.2f}GB "
             f"free={free_b / 1e9:.2f}/{total_b / 1e9:.2f}GB"
         )
     except Exception as exc:  # pragma: no cover - diagnostic only
         return f"err={type(exc).__name__}"
+
+
+def release_cuda_cache(device: torch.device) -> None:
+    """Drop unused caching-allocator blocks back to the driver (WDDM)."""
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return
+    import gc
+
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
+_PREFETCH_STREAMS: dict[int, torch.cuda.Stream] = {}
+
+
+def _shared_prefetch_stream(device: torch.device) -> torch.cuda.Stream:
+    idx = int(device.index) if device.index is not None else int(torch.cuda.current_device())
+    stream = _PREFETCH_STREAMS.get(idx)
+    if stream is None:
+        stream = torch.cuda.Stream(device=device)
+        _PREFETCH_STREAMS[idx] = stream
+    return stream
 
 
 class CUDAPrefetcher:
@@ -189,17 +215,14 @@ class CUDAPrefetcher:
         self.batches_yielded = 0
         self.last_fetch_s: float | None = None
         self.last_error: BaseException | None = None
+        self._it: Iterator[Any] | None = None
+        self._next: dict[str, Any] | None = None
+        self._stream = _shared_prefetch_stream(device) if self._use_cuda else None
 
-    def __iter__(self) -> Iterator[dict[str, Any]]:
-        if not self._use_cuda:
-            for batch in self.loader:
-                self.batches_yielded += 1
-                yield batch_to_device(batch, self.device, non_blocking=False)
-            return
-
-        stream = torch.cuda.Stream()
+    def __iter__(self) -> CUDAPrefetcher:
+        self.close()
         try:
-            it = iter(self.loader)
+            self._it = iter(self.loader)
         except Exception as exc:
             self.last_error = exc
             raise DataLoaderStallError(
@@ -209,49 +232,64 @@ class CUDAPrefetcher:
                 "hold TrajectoryDataset RGB arrays often raises OSError 22 / truncated pickle. "
                 "Use num_workers=0 for eval loaders."
             ) from exc
-        next_batch: dict[str, Any] | None
+        if self._use_cuda:
+            self._preload()
+        return self
 
-        def _preload() -> dict[str, Any] | None:
-            t0 = time.perf_counter()
-            try:
-                raw = next(it)
-            except StopIteration:
-                return None
-            except Exception as exc:
-                self.last_error = exc
-                # PyTorch raises RuntimeError on worker timeout / worker crash.
-                raise DataLoaderStallError(
-                    f"DataLoader fetch failed after {self.batches_yielded} batches "
-                    f"({type(exc).__name__}: {exc}). "
-                    "On Windows this is often a dead worker or pin_memory hang; "
-                    "retry with runtime.num_workers=0 or lower prefetch_factor."
-                ) from exc
-            try:
-                with torch.cuda.stream(stream):
-                    moved = batch_to_device(raw, self.device, non_blocking=True)
-            except Exception as exc:
-                self.last_error = exc
-                raise RuntimeError(
-                    f"H2D prefetch failed after {self.batches_yielded} batches "
-                    f"({type(exc).__name__}: {exc}); GPU={gpu_mem_str(self.device)}"
-                ) from exc
-            self.last_fetch_s = time.perf_counter() - t0
-            return moved
-
-        next_batch = _preload()
-        while next_batch is not None:
-            try:
-                torch.cuda.current_stream().wait_stream(stream)
-            except Exception as exc:
-                self.last_error = exc
-                raise RuntimeError(
-                    f"CUDA stream sync failed after {self.batches_yielded} batches "
-                    f"({type(exc).__name__}: {exc}); GPU={gpu_mem_str(self.device)}"
-                ) from exc
-            current = next_batch
-            next_batch = _preload()
+    def __next__(self) -> dict[str, Any]:
+        if self._it is None:
+            raise StopIteration
+        if not self._use_cuda:
+            raw = next(self._it)
             self.batches_yielded += 1
-            yield current
+            return batch_to_device(raw, self.device, non_blocking=False)
+        if self._next is None:
+            self.close()
+            raise StopIteration
+        try:
+            torch.cuda.current_stream().wait_stream(self._stream)
+        except Exception as exc:
+            self.last_error = exc
+            raise RuntimeError(
+                f"CUDA stream sync failed after {self.batches_yielded} batches "
+                f"({type(exc).__name__}: {exc}); GPU={gpu_mem_str(self.device)}"
+            ) from exc
+        current = self._next
+        self._preload()
+        self.batches_yielded += 1
+        return current
+
+    def _preload(self) -> None:
+        assert self._it is not None
+        t0 = time.perf_counter()
+        try:
+            raw = next(self._it)
+        except StopIteration:
+            self._next = None
+            return
+        except Exception as exc:
+            self.last_error = exc
+            raise DataLoaderStallError(
+                f"DataLoader fetch failed after {self.batches_yielded} batches "
+                f"({type(exc).__name__}: {exc}). "
+                "On Windows this is often a dead worker or pin_memory hang; "
+                "retry with runtime.num_workers=0 or lower prefetch_factor."
+            ) from exc
+        try:
+            with torch.cuda.stream(self._stream):
+                self._next = batch_to_device(raw, self.device, non_blocking=True)
+        except Exception as exc:
+            self.last_error = exc
+            raise RuntimeError(
+                f"H2D prefetch failed after {self.batches_yielded} batches "
+                f"({type(exc).__name__}: {exc}); GPU={gpu_mem_str(self.device)}"
+            ) from exc
+        self.last_fetch_s = time.perf_counter() - t0
+
+    def close(self) -> None:
+        """Drop the preloaded GPU batch and DataLoader iterator (safe if stopped early)."""
+        self._next = None
+        self._it = None
 
 
 class TrainProgressWatchdog:

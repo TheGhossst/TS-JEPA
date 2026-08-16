@@ -80,6 +80,34 @@ def test_tsjepa_predictor_wired_from_config():
     assert model.command_source == "teacher_dp"
     assert model.predictor.hidden_dim == 1024
     assert model.predictor.output_dim == 256
+    assert model.predictor.command_scale == pytest.approx(1.0)
+
+
+def test_command_scale_increases_init_sensitivity():
+    torch.manual_seed(0)
+    plain = Predictor(l2_normalize_output=False, command_scale=1.0)
+    scaled = Predictor(l2_normalize_output=False, command_scale=16.0)
+    scaled.load_state_dict(plain.state_dict())
+    z = torch.randn(32, 256)
+    plus = torch.ones(32, 1)
+    minus = -torch.ones(32, 1)
+    delta_plain = (plain.forward_step(z, plus) - plain.forward_step(z, minus)).norm(dim=-1).mean()
+    delta_scaled = (scaled.forward_step(z, plus) - scaled.forward_step(z, minus)).norm(dim=-1).mean()
+    assert float(delta_scaled.detach()) > float(delta_plain.detach())
+
+
+def test_command_scale_balances_preactivation_variance():
+    """With unit-std z and u, scale √256 makes command and embedding contribs comparable."""
+    torch.manual_seed(0)
+    pred = Predictor(hidden_batch_norm=False, l2_normalize_output=False, command_scale=16.0)
+    batch = 4096
+    z = torch.randn(batch, 256)
+    u = torch.randn(batch, 1)
+    weight = pred.fc_in.weight
+    emb = z @ weight[:, :256].T
+    cmd = (u * 16.0) @ weight[:, 256:].T
+    ratio = float(emb.var(dim=0).mean() / cmd.var(dim=0).mean())
+    assert 0.25 < ratio < 4.0
 
 
 def test_plan_predictor_config_rejects_wrong_hidden_dim():
@@ -110,3 +138,22 @@ def test_concat_fusion_is_not_a_plan_requirement():
     config = copy.deepcopy(load_config())
     config["ts_jepa"]["predictor"]["input_tensor_construction"] = "other_fusion"
     assert_plan_predictor_config(config)
+
+
+def test_film_conditioning_uses_command():
+    torch.manual_seed(0)
+    pred = Predictor(conditioning="film", l2_normalize_output=False)
+    assert pred.fc_in.in_features == 256
+    z = torch.randn(8, 256)
+    plus = torch.ones(8, 1)
+    minus = -torch.ones(8, 1)
+    delta = (pred.forward_step(z, plus) - pred.forward_step(z, minus)).norm(dim=-1).mean()
+    assert float(delta.detach()) > 0.0
+
+
+def test_paper_predictor_stays_concat():
+    config = load_config()
+    model = TSJEPA(config)
+    assert model.predictor.conditioning == "concat"
+    assert model.command_contrast_weight == pytest.approx(0.0)
+    assert model.command_contrast_sampling == "teacher_pair"

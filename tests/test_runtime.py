@@ -8,6 +8,37 @@ from ts_jepa.inference.infer import FrozenRuntimeController, RuntimeCommandStats
 from ts_jepa.models.actor import SemanticActor
 from ts_jepa.models.ts_jepa import TSJEPA
 from ts_jepa.preprocessing.command_stats import CommandNormalizer
+from torch.utils.data import DataLoader, Dataset
+
+from ts_jepa.runtime import CUDAPrefetcher
+
+
+class _DictTensorDataset(Dataset):
+    def __init__(self, n: int = 8) -> None:
+        self.x = torch.arange(n).float()
+
+    def __len__(self) -> int:
+        return int(self.x.numel())
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        return {"x": self.x[idx]}
+
+
+def test_cuda_prefetcher_cpu_close_drops_iterator():
+    loader = DataLoader(_DictTensorDataset(8), batch_size=4)
+    pref = CUDAPrefetcher(loader, torch.device("cpu"))
+    it = iter(pref)
+    first = next(it)
+    assert first["x"].shape[0] == 4
+    pref.close()
+    try:
+        next(it)
+        raised = False
+    except StopIteration:
+        raised = True
+    assert raised
+    n = sum(1 for _ in CUDAPrefetcher(loader, torch.device("cpu")))
+    assert n == 2
 
 
 def test_runtime_recv_and_lost_paths():

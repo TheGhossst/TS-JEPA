@@ -9,7 +9,12 @@ import torch
 import torch.nn.functional as F
 
 from ts_jepa.config import load_config
-from ts_jepa.losses.jepa_loss import cosine_alignment_loss, jepa_cosine_similarity, jepa_loss
+from ts_jepa.losses.jepa_loss import (
+    command_contrastive_hinge,
+    cosine_alignment_loss,
+    jepa_cosine_similarity,
+    jepa_loss,
+)
 from ts_jepa.losses.loss_plan import PLAN_JEPA_LOSS, assert_plan_jepa_loss_config
 from ts_jepa.models.ts_jepa import TSJEPA
 
@@ -106,3 +111,12 @@ def test_plan_jepa_loss_config_rejects_reconstruction_weight():
     config["ts_jepa"]["loss"]["reconstruction_weight"] = 1.0
     with pytest.raises(ValueError, match="reconstruction"):
         assert_plan_jepa_loss_config(config)
+
+
+def test_command_contrastive_hinge_zero_when_outputs_differ():
+    pred_a = F.normalize(torch.randn(4, 2, 256), dim=-1)
+    pred_b = F.normalize(torch.randn(4, 2, 256), dim=-1)
+    loss = command_contrastive_hinge(pred_a, pred_b, margin=0.05)
+    assert float(loss) == pytest.approx(0.0, abs=1e-5)
+    loss_same = command_contrastive_hinge(pred_a, pred_a, margin=0.05)
+    assert float(loss_same) == pytest.approx(0.05, abs=1e-5)

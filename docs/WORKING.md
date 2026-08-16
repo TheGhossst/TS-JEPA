@@ -14,7 +14,23 @@ and [`docs/plan.md`](plan.md). Do not point `assert_plan_*` at this overlay.
 python scripts/pipeline/run_working.py --config configs/ts_jepa_working.yaml --device cuda
 ```
 
-Seed 0 only by default. Full 5-seed protocol: `--all-seeds`.
+Seed 0 only by default. Full 5-seed protocol: `--all-seeds`. JEPA-only 20-epoch check (will skip if `runs/ts_jepa_working/seed_0` already finished ≥20 epochs):
+
+```powershell
+python scripts/pipeline/run_working.py --config configs/ts_jepa_working.yaml --device cuda --skip-generate --skip-actor --jepa-epochs 20
+```
+
+Continue the 3-epoch contrast smoke to 20 epochs (same weights, same run dir):
+
+```powershell
+python scripts/pipeline/train_jepa.py --config configs/ts_jepa_working.yaml --device cuda --single-seed 0 --epochs 20 --resume-from runs/ts_jepa_working_contrast_broad_smoke/seed_0/last.pt
+```
+
+Teacher-command distribution:
+
+```powershell
+python scripts/analysis/inspect_command_range.py --config configs/ts_jepa_working.yaml
+```
 
 Data: `data_working/`. Checkpoints: `runs/ts_jepa_working/`, `runs/semantic_actor_working/`.
 
@@ -24,8 +40,9 @@ Data: `data_working/`. Checkpoints: `runs/ts_jepa_working/`, `runs/semantic_acto
 |-------|-----------------|
 | \(\tau_o=1\) ms stored samples | Physics `dt=0.001`, **store / decide every 20 ms** (`observation_stride_steps=20`, `dp_substeps=20`) |
 | \(\Psi(x_k)\) one RGB frame | **κ=2 channel-concat** into Ψ (`jepa_observation: kappa_stack`, 6 channels) so \(z\) can carry velocity |
-| Cosine loss only | Cosine **+ VICReg** on raw context embeddings (\(\mu=25\), \(\nu=5\), \(\gamma=1\)). Train applies VICReg on the **effective batch** (256), not each microbatch of 16. Logged `vicreg_var` is \(\mathrm{mean}(\mathrm{relu}(\gamma-\mathrm{std}))\), not the std. |
+| Cosine loss only | Cosine **+ VICReg** (\(\mu=25\), \(\nu=1\), standardized cov) **+ command contrast** (teacher \(u\) vs \(-u\), plus pairs sampled over the actuator range in normalized space). |
 | Encoder L2-normalize (IC) | **Off** — cosine still normalizes inside the loss; VICReg \(\gamma=1\) needs unbounded \(z\) |
+| Concat \(z\) then BN | **FiLM**: BN on \(z\)-features only, then \(\gamma(u),\beta(u)\). Command-scale-16 concat did not stop \(u\)-invariance. |
 | SGD LR 0.2 | **AdamW peak LR \(3\times10^{-4}\)** (5-epoch warmup) |
 | 100 steps = 100 ms | 100 stored steps = **2 s** |
 

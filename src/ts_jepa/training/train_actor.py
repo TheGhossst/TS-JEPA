@@ -27,6 +27,7 @@ from ts_jepa.runtime import (
     gpu_mem_str,
     load_checkpoint,
     make_dataloader,
+    release_cuda_cache,
     reraise_cuda_context,
     save_checkpoint,
     state_dict_to_cpu,
@@ -258,6 +259,8 @@ def _train_semantic_actor_body(
         except DataLoaderStallError:
             watchdog.log(f"DataLoader stall at actor epoch={epoch} batch={n_batches}")
             raise
+        finally:
+            prefetcher.close()
         train_loss /= max(1, n_batches)
 
         watchdog.set_stage("validate")
@@ -267,6 +270,7 @@ def _train_semantic_actor_body(
             reraise_cuda_context(exc, where=f"actor epoch {epoch} validation", device=device)
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
         watchdog.log(f"epoch={epoch} train_loss={train_loss:.6f} val_loss={val_loss:.6f}")
+        release_cuda_cache(device)
 
         if val_loss < best_val:
             best_val = val_loss

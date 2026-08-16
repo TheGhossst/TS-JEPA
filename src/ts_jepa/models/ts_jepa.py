@@ -56,6 +56,8 @@ class TSJEPA(nn.Module):
             hidden_batch_norm=bool(pred_cfg.get("hidden_batch_norm", True)),
             strict_baseline_dim=strict_dim,
             l2_normalize_output=bool(pred_cfg.get("l2_normalize_output", True)),
+            command_scale=float(pred_cfg.get("command_scale", 1.0) or 1.0),
+            conditioning=str(pred_cfg.get("conditioning", "concat") or "concat"),
         )
         self.command_source = str(pred_cfg.get("command_source", "teacher_dp"))
         self.command_resolution: PredictorCommandResolution = load_predictor_command_resolution(config)
@@ -64,6 +66,20 @@ class TSJEPA(nn.Module):
         self.vicreg_variance_weight = float(loss_cfg.get("vicreg_variance_weight", 0.0) or 0.0)
         self.vicreg_covariance_weight = float(loss_cfg.get("vicreg_covariance_weight", 0.0) or 0.0)
         self.vicreg_gamma = float(loss_cfg.get("vicreg_gamma", 1.0) or 1.0)
+        self.vicreg_covariance_standardize = bool(loss_cfg.get("vicreg_covariance_standardize", False))
+        self.command_contrast_weight = float(loss_cfg.get("command_contrast_weight", 0.0) or 0.0)
+        self.command_contrast_margin = float(loss_cfg.get("command_contrast_margin", 0.05) or 0.05)
+        sampling = str(loss_cfg.get("command_contrast_sampling", "teacher_pair") or "teacher_pair")
+        if sampling not in {"teacher_pair", "broad_range", "both"}:
+            raise ValueError(
+                "ts_jepa.loss.command_contrast_sampling must be "
+                "'teacher_pair', 'broad_range', or 'both', "
+                f"got {sampling!r}"
+            )
+        self.command_contrast_sampling = sampling
+        # Filled from the fitted CommandNormalizer + actuator limits at train start.
+        self.command_norm_min = float("nan")
+        self.command_norm_max = float("nan")
 
     def train(self, mode: bool = True) -> TSJEPA:
         """Keep Ψθ̄ in eval. Plan §8: target is stop-grad + EMA, not a trained BN branch."""

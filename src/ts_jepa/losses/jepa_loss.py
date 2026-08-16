@@ -50,6 +50,25 @@ def jepa_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return -cos.mean()
 
 
+def command_contrastive_hinge(
+    pred_true: torch.Tensor,
+    pred_neg: torch.Tensor,
+    margin: float = 0.05,
+) -> torch.Tensor:
+    """
+    Penalize high cosine between predictor outputs for different commands.
+
+    Same context, two command sequences: relu(mean(cos(pred_true, pred_neg)) - (1 - margin)).
+    With margin=0.05 this is zero once mean cosine is already ≤ 0.95 (working gate 1).
+
+    Unlike ranking against the EMA target, this still has a FiLM/u-path gradient
+    when the predictor currently ignores u (both outputs identical ⇒ cos=1).
+    """
+    pred_a, pred_b = _as_bkp(pred_true, pred_neg)
+    cos = F.cosine_similarity(pred_a, pred_b, dim=-1, eps=1e-8)
+    return torch.relu(cos.mean() - (1.0 - float(margin)))
+
+
 def cosine_alignment_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """
     Minimizing form equivalent to `jepa_loss` (differs by constant +1).
@@ -73,12 +92,26 @@ def vicreg_variance_loss(z: torch.Tensor, gamma: float = 1.0, eps: float = 1e-4)
     return torch.mean(F.relu(float(gamma) - std))
 
 
-def vicreg_covariance_loss(z: torch.Tensor) -> torch.Tensor:
-    """VICReg off-diagonal covariance penalty on embeddings [B, D]."""
+def vicreg_covariance_loss(
+    z: torch.Tensor,
+    *,
+    standardize: bool = False,
+    eps: float = 1e-4,
+) -> torch.Tensor:
+    """
+    VICReg off-diagonal covariance penalty on embeddings [B, D].
+
+    Raw cov_ij = corr_ij * std_i * std_j, so the penalty rises automatically
+    while the variance hinge is still filling in even if correlations are flat.
+    ``standardize=True`` divides by per-dim std first (correlation off-diagonals).
+    """
     if z.ndim != 2:
         raise ValueError(f"vicreg_covariance_loss expects [B, D], got {tuple(z.shape)}")
     batch, dim = z.shape
     zc = z - z.mean(dim=0)
+    if standardize:
+        std = torch.sqrt(z.var(dim=0) + float(eps))
+        zc = zc / std.clamp_min(float(eps))
     denom = max(batch - 1, 1)
     cov = (zc.T @ zc) / denom
     off = cov.pow(2).sum() - cov.diag().pow(2).sum()

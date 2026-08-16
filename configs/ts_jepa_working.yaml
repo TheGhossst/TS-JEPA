@@ -33,6 +33,9 @@ ts_jepa:
     l2_normalize: false  # cosine still unit-normalizes inside the loss
   predictor:
     l2_normalize_output: false
+    command_scale: 1.0
+    # Concat-then-BN drowned u even with gain 16. FiLM modulates BN'd z-features.
+    conditioning: film
   optimizer:
     type: AdamW
     learning_rate: 0.0003  # 1e-3 overshot after warmup; EMA target lagged and cosine worsened
@@ -42,11 +45,17 @@ ts_jepa:
   loss:
     paper_objective: cosine_similarity_alignment
     implementation: negative_mean_cosine_similarity
-    # μ=25 is already the VICReg paper default. Do not ×5: logged vicreg_var is the
-    # hinge, not embedding std. ν=5 targets the rising off-diagonal covariance.
     vicreg_variance_weight: 25.0
-    vicreg_covariance_weight: 5.0
+    # Standardized cov ~1.1; ν=5 made 5*cov ≈ 5.6 drown cosine (~0.7) and EMA lagged.
+    vicreg_covariance_weight: 1.0
     vicreg_gamma: 1.0
+    vicreg_covariance_standardize: true
+    # Cosine can ignore u when teacher_dp is collinear with z. Penalize high
+    # cosine between P(z, u_a) and P(z, u_b). teacher_pair uses u vs -u;
+    # broad_range samples the actuator range in normalized space (not the ±20 gate).
+    command_contrast_weight: 1.0
+    command_contrast_margin: 0.05
+    command_contrast_sampling: both
   training_procedure:
     steps:
       - context_encoding

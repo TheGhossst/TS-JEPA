@@ -992,7 +992,7 @@ From `runtime.*` / `configure_training_runtime`:
 | Heartbeat / stall | 30 s / 180 s → stdout + `train.log` |
 | `cudnn.benchmark` | true (fixed 64×128) |
 | TF32 | allowed on CUDA |
-| CUDA memory fraction | 0.95 |
+| CUDA cache | `empty_cache` after each epoch; shared prefetch stream; log alloc/reserved/free |
 | Checkpoint I/O | CPU `state_dict` + sync before `torch.save` |
 | Prefetch | `CUDAPrefetcher` overlaps H2D with compute |
 

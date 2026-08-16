@@ -36,8 +36,9 @@ def evaluate_mse(actor: SemanticActor, loader, device: torch.device, criterion: 
     actor.eval()
     total = 0.0
     n_batches = 0
+    prefetcher = CUDAPrefetcher(loader, device)
     try:
-        for batch in CUDAPrefetcher(loader, device):
+        for batch in prefetcher:
             emb = batch["embedding"]
             target = batch["command"]
             pred = actor(emb)
@@ -47,6 +48,8 @@ def evaluate_mse(actor: SemanticActor, loader, device: torch.device, criterion: 
         raise
     except Exception as exc:
         reraise_cuda_context(exc, where=f"evaluate_mse after {n_batches} batches", device=device)
+    finally:
+        prefetcher.close()
     return total / max(1, n_batches)
 
 

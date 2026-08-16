@@ -17,11 +17,14 @@ from ts_jepa.plan.enforce import is_working_mode, jepa_in_channels, jepa_uses_ka
 from ts_jepa.plan.environment import assert_plan_environment_config
 from ts_jepa.plan.loss import assert_plan_jepa_loss_config
 from ts_jepa.plan.training import assert_plan_jepa_training_config
+from ts_jepa.preprocessing.command_stats import CommandNormalizer
 from ts_jepa.preprocessing.pipeline import PreprocessPipeline
 from ts_jepa.training.jepa_optimizer import build_jepa_optimizer
 from ts_jepa.training.jepa_procedure import (
+    attach_command_norm_range,
     jepa_forward_batch,
     jepa_sgd_and_ema_step,
+    sample_broad_command_pair,
     vicreg_regularizer,
 )
 
@@ -124,6 +127,11 @@ def test_vicreg_variance_positive_on_collapse_zero_on_spread():
     independent = torch.randn(128, 8)
     correlated = independent[:, :1].repeat(1, 8)
     assert float(vicreg_covariance_loss(correlated)) > float(vicreg_covariance_loss(independent))
+    scaled = independent * 3.0
+    assert float(vicreg_covariance_loss(scaled)) > float(vicreg_covariance_loss(independent))
+    assert float(vicreg_covariance_loss(independent, standardize=True)) == pytest.approx(
+        float(vicreg_covariance_loss(scaled, standardize=True)), rel=1e-3, abs=1e-5
+    )
     weighted, var_term, cov_term = vicreg_regularizer(
         collapsed, variance_weight=25.0, covariance_weight=5.0, gamma=1.0
     )
@@ -137,10 +145,20 @@ def test_working_optimizer_is_adamw():
     assert isinstance(opt, torch.optim.AdamW)
     assert opt.param_groups[0]["lr"] == pytest.approx(0.0003)
     assert working["ts_jepa"]["loss"]["vicreg_variance_weight"] == 25.0
-    assert working["ts_jepa"]["loss"]["vicreg_covariance_weight"] == 5.0
+    assert working["ts_jepa"]["loss"]["vicreg_covariance_weight"] == 1.0
+    assert working["ts_jepa"]["loss"]["vicreg_covariance_standardize"] is True
+    assert working["ts_jepa"]["loss"]["command_contrast_weight"] == 1.0
+    assert working["ts_jepa"]["loss"]["command_contrast_sampling"] == "both"
+    assert model.vicreg_covariance_standardize is True
+    assert model.command_contrast_weight == pytest.approx(1.0)
+    assert model.command_contrast_sampling == "both"
     assert model.context_encoder.stem[0].in_channels == 6
     assert model.context_encoder.l2_normalize is False
     assert model.predictor.l2_normalize_output is False
+    assert model.predictor.conditioning == "film"
+    assert model.predictor.command_scale == pytest.approx(1.0)
+    assert model.predictor.fc_in.in_features == 256
+    assert model.predictor.film is not None
 
 
 def test_working_jepa_forward_two_step_cpu_smoke():
@@ -162,10 +180,41 @@ def test_working_jepa_forward_two_step_cpu_smoke():
     assert torch.isfinite(result.cosine_loss)
     assert torch.isfinite(result.vicreg_variance)
     assert float(result.vicreg_variance.detach()) > 0.0 or float(result.vicreg_covariance.detach()) >= 0.0
+    assert torch.isfinite(result.command_contrast)
+    assert torch.isfinite(result.command_contrast_teacher)
+    assert torch.isfinite(result.command_contrast_broad)
+    assert float(result.command_contrast.detach()) > 0.0
     result.loss.backward()
+    assert model.predictor.film.weight.grad is not None
+    assert float(model.predictor.film.weight.grad.norm()) > 0.0
     jepa_sgd_and_ema_step(model, opt, max_grad_norm=1.0)
     z_norm = model.encode_context(batch["context"]).norm(dim=-1)
     assert not torch.allclose(z_norm, torch.ones_like(z_norm), atol=1e-3)
+
+
+def test_broad_command_contrast_samples_actuator_range():
+    working = copy.deepcopy(load_config("configs/ts_jepa_working.yaml"))
+    working["ts_jepa"]["prediction_horizon"]["Kp"] = 2
+    model = TSJEPA(working)
+    attach_command_norm_range(model, CommandNormalizer(mean=0.0, std=10.0), working)
+    assert model.command_norm_min == pytest.approx(-2.0)
+    assert model.command_norm_max == pytest.approx(2.0)
+    u_a, u_b = sample_broad_command_pair(torch.zeros(8, 2), -2.0, 2.0)
+    assert u_a.shape == (8, 2)
+    assert torch.all(u_a[0] == u_a[0, 0])
+    assert float(u_a.min()) >= -2.0 - 1e-6
+    assert float(u_a.max()) <= 2.0 + 1e-6
+    batch = {
+        "context": torch.randn(4, 6, 64, 128),
+        "future_frames": torch.randn(4, 2, 6, 64, 128),
+        "teacher_commands_norm": torch.zeros(4, 2),
+    }
+    result = jepa_forward_batch(model, batch)
+    assert torch.isfinite(result.command_contrast_teacher)
+    assert torch.isfinite(result.command_contrast_broad)
+    assert float(result.command_contrast.detach()) == pytest.approx(
+        float(result.command_contrast_teacher.detach() + result.command_contrast_broad.detach())
+    )
 
 
 def test_eval_dataloader_stays_inprocess():

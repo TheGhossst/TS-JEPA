@@ -7,6 +7,7 @@ CLI entry points for the TS-JEPA baseline. Run all commands from the repository 
 | Folder | Purpose |
 |--------|---------|
 | `pipeline/` | End-to-end baseline: data generation, training, evaluation |
+| `analysis/` | One-off dataset / normalizer inspections |
 | `dev/` | CUDA smoke tests and short training runs |
 | `diagnose/` | Debugging and representation analysis |
 | `tools/` | Plotting and auxiliary utilities |
@@ -25,6 +26,14 @@ python scripts/pipeline/run_working.py --config configs/ts_jepa_working.yaml --d
 ```
 
 Default is JEPA+actor seed 0. Add `--all-seeds` for the 5-seed protocol.
+
+```powershell
+# JEPA only, short / medium epoch budget (skips seeds already finished for that budget)
+python scripts/pipeline/run_working.py --config configs/ts_jepa_working.yaml --device cuda --skip-generate --skip-actor --jepa-epochs 20
+
+# Continue an existing last.pt (same run directory) to 20 epochs
+python scripts/pipeline/train_jepa.py --config configs/ts_jepa_working.yaml --device cuda --single-seed 0 --epochs 20 --resume-from runs/ts_jepa_working_contrast_broad_smoke/seed_0/last.pt
+```
 
 ## Full paper-scale pipeline
 
@@ -148,6 +157,16 @@ python scripts/pipeline/run_paper_experiments.py --config configs/ts_jepa_dp_fix
 | `dev/bench_jepa_accum_cuda.py` | Microbatch accumulation benchmark |
 | `dev/one_epoch_jepa_cuda.py` | Single-epoch CUDA training check |
 | `dev/validate_jepa_3epoch_cuda.py` | Short 3-epoch validation run |
+
+## Analysis scripts
+
+| Script | Description |
+|--------|-------------|
+| `analysis/inspect_command_range.py` | Raw vs z-scored teacher-command percentiles; ±20 N in normalized space |
+
+```powershell
+python scripts/analysis/inspect_command_range.py --config configs/ts_jepa_working.yaml
+```
 
 ## Diagnose scripts
 

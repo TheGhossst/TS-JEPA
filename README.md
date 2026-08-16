@@ -12,6 +12,19 @@ The published 1 ms + cosine-only recipe identity-collapses the predictor. For a 
 python scripts/pipeline/run_working.py --config configs/ts_jepa_working.yaml --device cuda
 ```
 
+JEPA only (skip data gen and actor), e.g. a 20-epoch stability check. Default seed 0; completed seeds under `runs/ts_jepa_working/` are skipped, so use a new run dir or resume:
+
+```powershell
+python scripts/pipeline/run_working.py --config configs/ts_jepa_working.yaml --device cuda --skip-generate --skip-actor --jepa-epochs 20
+python scripts/pipeline/train_jepa.py --config configs/ts_jepa_working.yaml --device cuda --single-seed 0 --epochs 20 --resume-from runs/ts_jepa_working_contrast_broad_smoke/seed_0/last.pt
+```
+
+Teacher-command range vs the ±20 gate probe:
+
+```powershell
+python scripts/analysis/inspect_command_range.py --config configs/ts_jepa_working.yaml
+```
+
 Run every command below from the **repository root** after a fresh clone.
 
 ## Environment and setup

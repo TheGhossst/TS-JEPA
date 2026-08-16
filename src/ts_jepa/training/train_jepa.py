@@ -19,6 +19,7 @@ from ts_jepa.training.jepa_optimizer import (
     build_jepa_optimizer,
 )
 from ts_jepa.training.jepa_procedure import (
+    attach_command_norm_range,
     jepa_forward_batch,
     jepa_sgd_and_ema_step,
     vicreg_regularizer,
@@ -35,6 +36,7 @@ from ts_jepa.runtime import (
     gpu_mem_str,
     load_checkpoint,
     make_dataloader,
+    release_cuda_cache,
     reraise_cuda_context,
     save_checkpoint,
     state_dict_to_cpu,
@@ -56,6 +58,9 @@ _PREDICTOR_ARCH_KEYS = (
     "activation",
     "autoregressive",
     "hidden_batch_norm",
+    "l2_normalize_output",
+    "command_scale",
+    "conditioning",
 )
 _PREDICTOR_COMMAND_RESOLUTION_KEYS = ("selected_source", "paper_exact")
 
@@ -271,12 +276,15 @@ def evaluate_cosine_loss(
     resolution = model.command_resolution
     total = 0.0
     n_batches = 0
+    prefetcher = CUDAPrefetcher(loader, device)
     try:
-        for batch in CUDAPrefetcher(loader, device):
+        for batch in prefetcher:
             # Plan §10 Algorithm 1 steps 1–4 (eval; no SGD/EMA).
             result = jepa_forward_batch(model, batch, resolution)
-            total += float(result.cosine_loss.item())
+            contrast_w = float(getattr(model, "command_contrast_weight", 0.0) or 0.0)
+            total += float(result.cosine_loss.item()) + contrast_w * float(result.command_contrast.item())
             n_batches += 1
+            del result
     except DataLoaderStallError as exc:
         if int(getattr(loader, "num_workers", 0) or 0) > 0 and is_dataloader_spawn_error(exc):
             return evaluate_cosine_loss(model, inprocess_dataloader(loader), device)
@@ -285,6 +293,8 @@ def evaluate_cosine_loss(
         if int(getattr(loader, "num_workers", 0) or 0) > 0 and is_dataloader_spawn_error(exc):
             return evaluate_cosine_loss(model, inprocess_dataloader(loader), device)
         reraise_cuda_context(exc, where=f"evaluate_cosine_loss after {n_batches} batches", device=device)
+    finally:
+        prefetcher.close()
     return total / max(1, n_batches)
 
 
@@ -432,10 +442,15 @@ def _train_ts_jepa_body(
     )
 
     model = TSJEPA(config).to(device)
+    attach_command_norm_range(model, normalizer, config)
     resolution = model.command_resolution
     watchdog.log(
         "predictor_command_resolution "
         + json.dumps(resolution.to_dict(), separators=(",", ":"))
+    )
+    watchdog.log(
+        f"command_contrast_sampling={model.command_contrast_sampling} "
+        f"command_norm_range=[{model.command_norm_min:.6g}, {model.command_norm_max:.6g}]"
     )
     optimizer = build_jepa_optimizer(model, config)
 
@@ -494,6 +509,9 @@ def _train_ts_jepa_body(
         train_cosine = 0.0
         train_vicreg_var = 0.0
         train_vicreg_cov = 0.0
+        train_contrast = 0.0
+        train_contrast_teacher = 0.0
+        train_contrast_broad = 0.0
         n_steps = 0
         micro_in_group = 0
         micros_seen = 0
@@ -503,6 +521,8 @@ def _train_ts_jepa_body(
         var_w = float(getattr(model, "vicreg_variance_weight", 0.0) or 0.0)
         cov_w = float(getattr(model, "vicreg_covariance_weight", 0.0) or 0.0)
         gamma = float(getattr(model, "vicreg_gamma", 1.0) or 1.0)
+        cov_stdize = bool(getattr(model, "vicreg_covariance_standardize", False))
+        contrast_w = float(getattr(model, "command_contrast_weight", 0.0) or 0.0)
         # Covariance on microbatch 16×256 is rank-deficient; apply VICReg on the
         # concatenated effective batch after cosine grads are accumulated.
         vicreg_on_effective = (var_w != 0.0 or cov_w != 0.0) and accum_steps > 1
@@ -540,7 +560,8 @@ def _train_ts_jepa_body(
                 try:
                     # Plan §10 Algorithm 1 steps 1–4 (context → target stop-grad → predict → loss).
                     result = jepa_forward_batch(model, batch, resolution)
-                    loss_bwd = result.cosine_loss if vicreg_on_effective else result.loss
+                    task_loss = result.cosine_loss + contrast_w * result.command_contrast
+                    loss_bwd = task_loss if vicreg_on_effective else result.loss
                     # Scale so accumulated grads match mean loss over the effective batch.
                     watchdog.touch(micro=micros_seen, stage="backward")
                     (loss_bwd / accum_steps).backward()
@@ -552,13 +573,16 @@ def _train_ts_jepa_body(
                     )
 
                 # Keep loss on GPU until the effective step ends (avoid per-micro .item() sync).
-                det = result.cosine_loss.detach() if vicreg_on_effective else result.loss.detach()
+                det = task_loss.detach() if vicreg_on_effective else result.loss.detach()
                 group_loss_sum = det if group_loss_sum is None else (group_loss_sum + det)
                 components = torch.stack(
                     (
                         result.cosine_loss.detach(),
                         result.vicreg_variance.detach(),
                         result.vicreg_covariance.detach(),
+                        result.command_contrast.detach(),
+                        result.command_contrast_teacher.detach(),
+                        result.command_contrast_broad.detach(),
                     )
                 )
                 group_components_sum = (
@@ -575,7 +599,9 @@ def _train_ts_jepa_body(
                     watchdog.touch(micro=micros_seen, stage="optimizer")
                     assert group_loss_sum is not None
                     assert group_components_sum is not None
-                    cosine_v, var_v, cov_v = (group_components_sum / accum_steps).tolist()
+                    cosine_v, var_v, cov_v, contrast_v, contrast_teacher_v, contrast_broad_v = (
+                        group_components_sum / accum_steps
+                    ).tolist()
                     step_loss = float(group_loss_sum.item()) / accum_steps
                     if vicreg_on_effective:
                         z_all = model.encode_context(torch.cat(group_contexts, dim=0))
@@ -584,11 +610,12 @@ def _train_ts_jepa_body(
                             variance_weight=var_w,
                             covariance_weight=cov_w,
                             gamma=gamma,
+                            covariance_standardize=cov_stdize,
                         )
                         vicreg.backward()
                         var_v = float(var_term.detach())
                         cov_v = float(cov_term.detach())
-                        step_loss = float(cosine_v) + float(vicreg.detach())
+                        step_loss = float(cosine_v) + contrast_w * float(contrast_v) + float(vicreg.detach())
                     # Plan §10 Algorithm 1 steps 5–6: SGD(θ,ϕ) then EMA(θ̄).
                     jepa_sgd_and_ema_step(
                         model,
@@ -605,6 +632,9 @@ def _train_ts_jepa_body(
                 train_cosine += float(cosine_v)
                 train_vicreg_var += float(var_v)
                 train_vicreg_cov += float(cov_v)
+                train_contrast += float(contrast_v)
+                train_contrast_teacher += float(contrast_teacher_v)
+                train_contrast_broad += float(contrast_broad_v)
                 n_steps += 1
                 group_loss_sum = None
                 group_components_sum = None
@@ -617,6 +647,11 @@ def _train_ts_jepa_body(
                 f"last_fetch_s={prefetcher.last_fetch_s} GPU={gpu_mem_str(device)}"
             )
             raise
+        finally:
+            prefetcher.close()
+            group_contexts = []
+            group_loss_sum = None
+            group_components_sum = None
 
         # Incomplete trailing microbatches must never produce an optimizer step.
         if micro_in_group > 0:
@@ -636,10 +671,16 @@ def _train_ts_jepa_body(
         train_cosine /= max(1, n_steps)
         train_vicreg_var /= max(1, n_steps)
         train_vicreg_cov /= max(1, n_steps)
+        train_contrast /= max(1, n_steps)
+        train_contrast_teacher /= max(1, n_steps)
+        train_contrast_broad /= max(1, n_steps)
         watchdog.set_stage("validate")
         watchdog.log(
             f"epoch={epoch} train_loss={train_loss:.6f} cosine={train_cosine:.6f} "
             f"vicreg_var={train_vicreg_var:.6f} vicreg_cov={train_vicreg_cov:.6f} "
+            f"cmd_contrast={train_contrast:.6f} "
+            f"cmd_contrast_teacher={train_contrast_teacher:.6f} "
+            f"cmd_contrast_broad={train_contrast_broad:.6f} "
             f"starting val GPU={gpu_mem_str(device)}"
         )
         try:
@@ -653,12 +694,18 @@ def _train_ts_jepa_body(
                 "train_cosine": train_cosine,
                 "train_vicreg_variance": train_vicreg_var,
                 "train_vicreg_covariance": train_vicreg_cov,
+                "train_command_contrast": train_contrast,
+                "train_command_contrast_teacher": train_contrast_teacher,
+                "train_command_contrast_broad": train_contrast_broad,
                 "val_loss": val_loss,
             }
         )
         watchdog.log(
             f"epoch={epoch} train_loss={train_loss:.6f} cosine={train_cosine:.6f} "
             f"vicreg_var={train_vicreg_var:.6f} vicreg_cov={train_vicreg_cov:.6f} "
+            f"cmd_contrast={train_contrast:.6f} "
+            f"cmd_contrast_teacher={train_contrast_teacher:.6f} "
+            f"cmd_contrast_broad={train_contrast_broad:.6f} "
             f"val_loss={val_loss:.6f}"
         )
 
@@ -708,6 +755,8 @@ def _train_ts_jepa_body(
             ),
         )
         watchdog.log(f"saved last.pt epoch={epoch}")
+        release_cuda_cache(device)
+        watchdog.log(f"epoch={epoch} cache_released GPU={gpu_mem_str(device)}")
 
     if best_state is not None:
         model.load_state_dict(best_state)

@@ -25,6 +25,8 @@ class Predictor(nn.Module):
         hidden_batch_norm: bool = True,
         strict_baseline_dim: bool = True,
         l2_normalize_output: bool = True,
+        command_scale: float = 1.0,
+        conditioning: str = "concat",
     ) -> None:
         super().__init__()
         if int(hidden_dim) != 1024:
@@ -47,19 +49,44 @@ class Predictor(nn.Module):
         self.input_dim = self.embedding_dim + self.command_dim
         self.hidden_batch_norm = bool(hidden_batch_norm)
         self.l2_normalize_output = bool(l2_normalize_output)
+        self.command_scale = float(command_scale)
+        if self.command_scale <= 0.0:
+            raise ValueError(f"predictor command_scale must be > 0, got {self.command_scale}")
+        cond = str(conditioning).strip().lower()
+        if cond not in {"concat", "film"}:
+            raise ValueError(f"predictor conditioning must be 'concat' or 'film', got {conditioning!r}")
+        self.conditioning = cond
 
-        # IC fusion: concat(z, u) → Linear(257, 1024); concat width is not paper-specified.
-        # IC: BatchNorm1d after the hidden linear (BYOL/I-JEPA-style) to condition
-        # gradients under Table II SGD 0.2. Not a paper layer.
-        self.fc_in = nn.Linear(self.input_dim, self.hidden_dim)
-        self.bn = nn.BatchNorm1d(self.hidden_dim) if self.hidden_batch_norm else nn.Identity()
         self.relu = nn.ReLU(inplace=True)
         self.fc_out = nn.Linear(self.hidden_dim, self.output_dim)
+        if self.conditioning == "film":
+            # BN on z-features only, then FiLM(u). Concat-then-BN drowns scalar u.
+            self.fc_in = nn.Linear(self.embedding_dim, self.hidden_dim)
+            self.bn = nn.BatchNorm1d(self.hidden_dim) if self.hidden_batch_norm else nn.Identity()
+            self.film = nn.Linear(self.command_dim, 2 * self.hidden_dim)
+            nn.init.normal_(self.film.weight, std=0.02)
+            nn.init.zeros_(self.film.bias)
+            self.input_dim = self.embedding_dim
+        else:
+            # IC fusion: concat(z, u) → Linear(257, 1024). Paper overlay stays here.
+            self.fc_in = nn.Linear(self.input_dim, self.hidden_dim)
+            self.bn = nn.BatchNorm1d(self.hidden_dim) if self.hidden_batch_norm else nn.Identity()
+            self.film = None
 
     def forward_mlp(self, x: torch.Tensor) -> torch.Tensor:
+        if self.conditioning == "film":
+            raise ValueError("forward_mlp is concat-only; use forward_step for FiLM")
         if x.shape[-1] != self.input_dim:
             raise ValueError(f"predictor input dim must be {self.input_dim}, got {x.shape[-1]}")
         return self.fc_out(self.relu(self.bn(self.fc_in(x))))
+
+    def _film_mlp(self, embedding: torch.Tensor, command_norm: torch.Tensor) -> torch.Tensor:
+        assert self.film is not None
+        hidden = self.bn(self.fc_in(embedding))
+        gamma_beta = self.film(command_norm)
+        gamma, beta = gamma_beta.chunk(2, dim=-1)
+        hidden = (1.0 + gamma) * hidden + beta
+        return self.fc_out(self.relu(hidden))
 
     def forward_step(self, embedding: torch.Tensor, command_norm: torch.Tensor) -> torch.Tensor:
         """
@@ -71,10 +98,15 @@ class Predictor(nn.Module):
             command_norm = command_norm.unsqueeze(-1)
         if command_norm.ndim == 2 and command_norm.shape[-1] != self.command_dim:
             command_norm = command_norm.view(command_norm.shape[0], self.command_dim)
-        x = torch.cat([embedding, command_norm], dim=-1)
-        if x.shape[-1] != self.input_dim:
-            raise ValueError(f"predictor input dim must be {self.input_dim}, got {x.shape[-1]}")
-        out = self.forward_mlp(x)
+        if self.conditioning == "film":
+            out = self._film_mlp(embedding, command_norm)
+        else:
+            if self.command_scale != 1.0:
+                command_norm = command_norm * self.command_scale
+            x = torch.cat([embedding, command_norm], dim=-1)
+            if x.shape[-1] != self.input_dim:
+                raise ValueError(f"predictor input dim must be {self.input_dim}, got {x.shape[-1]}")
+            out = self.forward_mlp(x)
         if self.l2_normalize_output:
             return F.normalize(out, dim=-1, eps=1e-8)
         return out
@@ -118,7 +150,9 @@ class Predictor(nn.Module):
             ),
             "hidden_batch_norm": self.hidden_batch_norm,
             "l2_normalize_output": self.l2_normalize_output,
+            "command_scale": self.command_scale,
+            "conditioning": self.conditioning,
             "autoregressive": True,
             "detach_autoregressive_state": True,
-            "inputs": "concat(embedding, command)",
+            "inputs": "film(embedding, command)" if self.conditioning == "film" else "concat(embedding, command)",
         }

@@ -1,6 +1,7 @@
 """Loss functions for TS-JEPA training."""
 
 from ts_jepa.losses.jepa_loss import (
+    command_contrastive_hinge,
     cosine_alignment_loss,
     jepa_cosine_similarity,
     jepa_loss,
@@ -12,6 +13,7 @@ from ts_jepa.losses.loss_plan import PLAN_JEPA_LOSS, assert_plan_jepa_loss_confi
 __all__ = [
     "PLAN_JEPA_LOSS",
     "assert_plan_jepa_loss_config",
+    "command_contrastive_hinge",
     "cosine_alignment_loss",
     "jepa_cosine_similarity",
     "jepa_loss",
