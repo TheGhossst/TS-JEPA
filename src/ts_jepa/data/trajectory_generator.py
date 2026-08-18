@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from tqdm import tqdm
 
 from ts_jepa.config import project_root
 from ts_jepa.control.dp_teacher import DPControlTeacher
@@ -193,8 +194,12 @@ def generate_dataset_split(
         env, teacher = build_env_and_teacher(config)
     steps = int(config["simulation"]["trajectory_steps"])
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Drop leftovers from a previous count so glob-based loaders cannot mix
+    # old test indices into a larger train range (or keep extra files).
+    for stale in output_dir.glob("*.npz"):
+        stale.unlink()
 
-    for offset in range(count):
+    for offset in tqdm(range(count), desc=f"gen {split}", leave=True):
         trajectory_index = start_index + offset
         seed = 10_000 + trajectory_index
         trajectory = generate_trajectory(env, teacher, steps=steps, seed=seed)
@@ -214,12 +219,23 @@ def generate_all_trajectories(
     data_root: Path | None = None,
     *,
     run_sanity_check: bool = True,
+    families: tuple[str, ...] | None = None,
 ) -> Path:
     """
     Generate plan §4 datasets D_s (JEPA) and D_a (semantic actor).
 
+    ``families`` selects ``jepa``, ``actor``, or both (default). Use
+    ``families=("actor",)`` to regenerate D_a without rewriting D_s files.
+
     Raises RuntimeError if post-generation sanity checks fail.
     """
+    allowed = {"jepa", "actor"}
+    wanted = set(families) if families is not None else set(allowed)
+    unknown = wanted - allowed
+    if unknown:
+        raise ValueError(f"unknown trajectory families {sorted(unknown)}; expected subset of {sorted(allowed)}")
+    if not wanted:
+        raise ValueError("families must include at least one of: jepa, actor")
     assert_plan_dataset_counts(config)
     assert_plan_environment_config(config)
     assert_plan_preprocessing_config(config)
@@ -233,6 +249,8 @@ def generate_all_trajectories(
         ("actor_train", "actor", "train"),
         ("actor_test", "actor", "test"),
     ):
+        if family not in wanted:
+            continue
         count, start = index_plan[split_name]
         generate_dataset_split(
             config,

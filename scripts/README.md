@@ -35,6 +35,22 @@ python scripts/pipeline/run_working.py --config configs/ts_jepa_working.yaml --d
 python scripts/pipeline/train_jepa.py --config configs/ts_jepa_working.yaml --device cuda --single-seed 0 --epochs 20 --resume-from runs/ts_jepa_working_contrast_broad_smoke/seed_0/last.pt
 ```
 
+Actor DAgger (frozen JEPA; does not overwrite `runs/semantic_actor_working/best.pt`):
+
+```powershell
+python scripts/pipeline/train_actor_dagger.py --config configs/ts_jepa_working.yaml --device cuda --jepa-checkpoint runs/ts_jepa_working/seed_0/best.pt --actor-checkpoint runs/semantic_actor_working/best.pt
+```
+
+Writes `runs/semantic_actor_working_dagger/best.pt`.
+
+If the DP teacher itself fails Eq. 28 (cart walks off), clone/DAgger cannot pass the closed-loop gate. Use LQR on a frozen-z state probe instead:
+
+```powershell
+python scripts/pipeline/train_actor_probe_lqr.py --config configs/ts_jepa_working.yaml --device cuda --jepa-checkpoint runs/ts_jepa_working/seed_0/best.pt --actor-checkpoint runs/semantic_actor_working/best.pt
+```
+
+Writes `runs/semantic_actor_working_probe_lqr/probe_lqr.npz`.
+
 ## Full paper-scale pipeline
 
 **Config:** `configs/ts_jepa_dp_fixed.yaml`  
@@ -177,6 +193,9 @@ python scripts/analysis/inspect_command_range.py --config configs/ts_jepa_workin
 | `diagnose/diagnose_jepa_raw_vs_embedding_collision.py` | Raw vs latent collision analysis |
 | `diagnose/diagnose_jepa_representation_pipeline.py` | Full representation pipeline audit |
 | `diagnose/diagnose_dp_teacher.py` | DP teacher control inspection |
+| `diagnose/probe_frozen_jepa_command.py` | Frozen z vs raw-state command recoverability |
+| `diagnose/probe_frozen_jepa_state_mlp.py` | Nonlinear z→state MLP vs linear; Probe-LQR on MLP |
+| `diagnose/diagnose_raw_state_actor.py` | Same Cε MLP on raw state/history vs z; action-scaling audit |
 | `diagnose/diagnose_actor_training.py` | Actor training diagnostics |
 | `diagnose/diagnose_actor_predictions.py` | Actor prediction analysis |
 
@@ -190,6 +209,11 @@ python scripts/diagnose/diagnose_jepa_representation_pipeline.py --config config
 python scripts/diagnose/diagnose_dp_teacher.py
 python scripts/diagnose/diagnose_actor_training.py --config configs/ts_jepa_dp_fixed.yaml --device cuda
 python scripts/diagnose/diagnose_actor_predictions.py --config configs/ts_jepa_dp_fixed.yaml --device cuda
+
+# Representation vs actor-pipeline (working overlay; does not retrain JEPA)
+python scripts/diagnose/probe_frozen_jepa_state.py --config configs/ts_jepa_working.yaml --device cuda --jepa-checkpoint runs/ts_jepa_working/seed_0/best.pt
+python scripts/diagnose/probe_frozen_jepa_state_mlp.py --config configs/ts_jepa_working.yaml --device cuda --jepa-checkpoint runs/ts_jepa_working/seed_0/best.pt --actor-checkpoint runs/semantic_actor_working/best.pt
+python scripts/diagnose/diagnose_raw_state_actor.py --config configs/ts_jepa_working.yaml --device cuda --jepa-checkpoint runs/ts_jepa_working/seed_0/best.pt --actor-checkpoint runs/semantic_actor_working/best.pt
 ```
 
 ## Tools

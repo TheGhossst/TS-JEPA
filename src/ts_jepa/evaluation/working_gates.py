@@ -147,20 +147,57 @@ def evaluate_jepa_working_gates(
     }
 
 
+def nmae_label_source_from_actor_payload(payload: dict[str, Any] | None) -> str:
+    """DP-teacher NMAE is the BC gate. LQR-DAgger checkpoints must not use it."""
+    if not isinstance(payload, dict):
+        return "dp_teacher"
+    if str(payload.get("method", "")).lower() != "dagger":
+        return "dp_teacher"
+    expert = payload.get("expert")
+    if expert is None:
+        dagger = (payload.get("config") or {}).get("semantic_actor", {}).get("dagger") or {}
+        expert = dagger.get("expert")
+    if str(expert).lower() == "lqr":
+        return "lqr"
+    return "dp_teacher"
+
+
+def _load_actor_payload(actor_ckpt: Path | None) -> dict[str, Any] | None:
+    if actor_ckpt is None:
+        return None
+    path = Path(actor_ckpt)
+    if not path.is_file():
+        return None
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    return payload if isinstance(payload, dict) else None
+
+
 def evaluate_actor_working_gates(
     config: dict[str, Any],
     controller: FrozenRuntimeController,
     data_root: Path,
+    *,
+    actor_ckpt: Path | None = None,
 ) -> dict[str, Any]:
-    nmae = evaluate_actor_nmae(config, controller, data_root=data_root)
+    payload = _load_actor_payload(actor_ckpt)
+    labels = nmae_label_source_from_actor_payload(payload)
+    nmae = evaluate_actor_nmae(config, controller, data_root=data_root, command_labels=labels)
     require = bool(
         config.get("evaluation", {}).get("working_gates", {}).get("actor_must_beat_mean_command", True)
     )
     actor_ok = bool(nmae.get("beats_mean_command_baseline"))
-    return {
+    out: dict[str, Any] = {
         "actor_nmae": nmae,
+        "nmae_command_labels": labels,
         "pass": bool(actor_ok) if require else True,
     }
+    if labels == "lqr":
+        out["note"] = (
+            "Gated NMAE is vs discrete LQR(state) on actor-test frames, not DP-teacher "
+            "commands. A DAgger actor trained on LQR is not expected to beat the DP "
+            "mean-command baseline; that number is not a working gate for this checkpoint."
+        )
+    return out
 
 
 def evaluate_closed_loop_working_gates(
@@ -257,7 +294,9 @@ def run_working_gates(
     controller = FrozenRuntimeController.from_checkpoints(
         config, jepa_ckpt, actor_ckpt, device=device
     )
-    actor_report = evaluate_actor_working_gates(config, controller, root)
+    actor_report = evaluate_actor_working_gates(
+        config, controller, root, actor_ckpt=actor_ckpt
+    )
     report["actor_checkpoint"] = str(actor_ckpt)
     report["actor"] = actor_report
     report["pass"] = bool(report["pass"] and actor_report["pass"])

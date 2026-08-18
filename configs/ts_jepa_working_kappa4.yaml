@@ -1,0 +1,19 @@
+# Single-seed κ-increase experiment (signed off). Same working salvage as
+# ts_jepa_working.yaml except Ψ sees four stacked RGB frames.
+# Does not overwrite runs/ts_jepa_working/. Do not 5-seed or retrain Cε until
+# the linear z→θ̇ probe beats κ=2 (R²≈0.11).
+_base: ts_jepa_working.yaml
+
+paths:
+  ts_jepa_dirname: ts_jepa_working_kappa4
+
+environment:
+  kappa: 4
+  context_tensor_shape: [12, 64, 128]
+
+input:
+  kappa: 4
+
+temporal:
+  kappa: 4
+  context_frames: "[x_{k-3}, x_{k-2}, x_{k-1}, x_k]"

@@ -17,6 +17,13 @@ simulation:
 
 dataset_generation:
   observation_stride_steps: 20
+  # Working overlay only: paper D_a is 100/20. 100 traj × 100 steps = 10k (z,u)
+  # pairs, but val bottoms at epoch 2 (~80 independent rollouts after the 0.2
+  # holdout) and the actor loses the NMAE mean-command gate. 500/100 keeps the
+  # 5:1 split, stays disjoint from D_s indices 0–239, and is ~2.5× JEPA gen time.
+  D_a:
+    train_trajectories: 500
+    test_trajectories: 100
 
 control_teacher:
   dp_substeps: 20  # one Bellman decision = one stored step (20 ms)
@@ -65,11 +72,37 @@ ts_jepa:
       - adamw_update_theta_phi
       - ema_update_target
 
+semantic_actor:
+  architecture:
+    dropout: 0.2  # Table III; 5× D_a is the regularizer, extra dropout underfit
+  optimizer:
+    weight_decay: 0.01  # baseline IC; 0.05 + 0.3 dropout pinned train≈val≈mean
+  dataset:
+    train_trajectories: 500
+    test_trajectories: 100
+  # Working overlay only. Paper baseline stays one-step BC. Default expert is
+  # discrete LQR on true state (the DP teacher is not Eq. 28-stable).
+  dagger:
+    rounds: 8
+    rollouts_per_round: 40
+    beta_start: 0.85
+    beta_decay: 0.85
+    epochs_per_round: 12
+    mix_offline: false
+    offline_max_samples: 8000
+    lossy_fraction: 0.25
+    rollout_seed0: 5000
+    init_from_bc: true
+    mix_mode: convex
+    checkpoint_selection: last
+    expert: lqr
+    run_dirname: semantic_actor_working_dagger
+
 evaluation:
   working_gates:
     predictor_cosine_plus20_minus20_max: 0.95
     predictor_l2_plus20_minus20_min: 0.2
     encoder_effective_rank_min: 8.0
-    actor_must_beat_mean_command: true
+    actor_must_beat_mean_command: true  # BC: vs DP u*. LQR-DAgger ckpts: vs LQR(state)
     closed_loop_must_beat_hold_and_zero: true
     closed_loop_seeds: [100, 101, 102]

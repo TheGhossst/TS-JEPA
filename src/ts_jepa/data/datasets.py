@@ -71,14 +71,17 @@ class TrajectoryDataset(Dataset):
         self.files = files if files is not None else sorted(self.trajectory_dir.glob("*.npz"))
         self.frames: list[np.ndarray] = []
         self.commands: list[np.ndarray] = []
+        self.states: list[np.ndarray | None] = []
         self.index_map: list[tuple[int, int]] = []
         for file_idx, file_path in enumerate(self.files):
             with np.load(file_path) as data:
                 frames = np.asarray(data["frames"])
                 commands = np.asarray(data["commands"], dtype=np.float32)
+                states = np.asarray(data["states"], dtype=np.float32) if "states" in data else None
             assert_native_frame_hw(frames, config, source=str(file_path))
             self.frames.append(frames)
             self.commands.append(commands)
+            self.states.append(states)
             length = int(commands.shape[0])
             max_start = max_valid_time_index(length, self.kp)
             for time_index in range(max(0, max_start + 1)):
@@ -127,7 +130,7 @@ class TrajectoryDataset(Dataset):
         target_commands = commands[tgt_cmd_idx[0] : tgt_cmd_idx[0] + self.kp].astype(np.float32)
         target_commands_norm = self.normalizer.normalize(target_commands)
 
-        return {
+        item = {
             "context": context,
             "future_frames": future_stack,  # [Kp, 3, H, W]
             "teacher_commands": torch.from_numpy(teacher_commands.copy()),
@@ -136,6 +139,10 @@ class TrajectoryDataset(Dataset):
             "target_commands_norm": torch.from_numpy(target_commands_norm.copy()),
             "time_index": torch.tensor(time_index, dtype=torch.long),
         }
+        states = self.states[file_idx]
+        if states is not None:
+            item["state"] = torch.from_numpy(np.asarray(states[time_index], dtype=np.float32).copy())
+        return item
 
 
 class ActorEmbeddingDataset(Dataset):

@@ -79,6 +79,7 @@ def test_trajectory_dataset_temporal_fields(tmp_path):
     k = 5
     sample = ds[ds.index_map.index((0, k))]
     assert int(sample["time_index"]) == k
+    assert sample["state"].shape == (4,)
     assert sample["teacher_commands"].shape == (4,)
     assert torch.allclose(sample["teacher_commands"], torch.tensor([5.0, 6.0, 7.0, 8.0]))
     assert torch.allclose(sample["target_commands"], torch.tensor([6.0, 7.0, 8.0, 9.0]))

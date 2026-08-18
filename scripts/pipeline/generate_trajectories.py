@@ -33,6 +33,16 @@ def main() -> None:
             "Use a separate directory (e.g. data_dp_fixed) to avoid overwriting existing data."
         ),
     )
+    parser.add_argument(
+        "--families",
+        nargs="+",
+        choices=("jepa", "actor"),
+        default=None,
+        help=(
+            "Generate only these families (default: both). "
+            "Use '--families actor' to leave existing JEPA trajectories untouched."
+        ),
+    )
     args = parser.parse_args()
     config = load_config(args.config)
     assert_plan_environment_validated(config)
@@ -44,8 +54,16 @@ def main() -> None:
     assert_plan_jepa_training_config(config)
     assert_plan_jepa_procedure_config(config)
     data_root = Path(args.data_root) if args.data_root else (project_root(config) / config["paths"]["data_root"])
-    root = generate_all_trajectories(config, data_root=data_root, run_sanity_check=False)
-    report = sanity_check_trajectory_root(config, root, fit_normalizer=True)
+    families = tuple(args.families) if args.families else None
+    actor_only = families == ("actor",)
+    root = generate_all_trajectories(
+        config,
+        data_root=data_root,
+        run_sanity_check=False,
+        families=families,
+    )
+    # Actor-only regen must not rewrite JEPA-train command_norm.json.
+    report = sanity_check_trajectory_root(config, root, fit_normalizer=not actor_only)
     out = project_root(config) / "runs" / "eval" / "trajectory_sanity.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", encoding="utf-8") as handle:

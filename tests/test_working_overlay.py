@@ -42,11 +42,35 @@ def test_working_overlay_isolated_from_paper_paths():
     assert paper["paths"]["data_root"] == "data"
     assert paper["simulation"]["observation_stride_steps"] == 1
     assert working["simulation"]["observation_stride_steps"] == 20
+    assert working["semantic_actor"]["dataset"]["train_trajectories"] == 500
+    assert working["semantic_actor"]["dataset"]["test_trajectories"] == 100
+    assert working["dataset_generation"]["D_a"]["train_trajectories"] == 500
+    assert working["semantic_actor"]["architecture"]["hidden_dims"] == [1024, 256]
+    assert working["semantic_actor"]["architecture"]["dropout"] == 0.2
+    assert working["semantic_actor"]["optimizer"]["weight_decay"] == 0.01
     assert working["control_teacher"]["dp_substeps"] == 20
     assert working["simulation"]["dt"] == 0.001
     assert jepa_uses_kappa_stack(working)
     assert jepa_in_channels(working) == 6
     assert jepa_in_channels(paper) == 3
+
+
+def test_working_kappa4_overlay_stacks_12_channels_and_isolated_run_dir():
+    kappa2 = load_config("configs/ts_jepa_working.yaml")
+    kappa4 = load_config("configs/ts_jepa_working_kappa4.yaml")
+    assert plan_enforced(kappa4) is False
+    assert is_working_mode(kappa4) is True
+    assert kappa4["paths"]["data_root"] == "data_working"
+    assert jepa_run_dirname(kappa4) == "ts_jepa_working_kappa4"
+    assert jepa_run_dirname(kappa2) == "ts_jepa_working"
+    assert int(kappa4["input"]["kappa"]) == 4
+    assert jepa_uses_kappa_stack(kappa4)
+    assert jepa_in_channels(kappa4) == 12
+    frames = np.zeros((5, 128, 256, 3), dtype=np.uint8)
+    ctx = PreprocessPipeline(kappa4, training=False).make_jepa_input(frames, time_index=4)
+    assert tuple(ctx.shape) == (12, 64, 128)
+    model = TSJEPA(kappa4)
+    assert model.context_encoder.in_channels == 12
 
 
 def test_working_overlay_skips_plan_asserts():

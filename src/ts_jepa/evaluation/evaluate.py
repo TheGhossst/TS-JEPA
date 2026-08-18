@@ -564,13 +564,19 @@ def evaluate_actor_nmae(
     config: dict[str, Any],
     controller: FrozenRuntimeController,
     data_root: Path | None = None,
+    *,
+    command_labels: str = "dp_teacher",
 ) -> dict[str, Any]:
     """
-    Actor command NMAE on encoded (received) embeddings vs teacher u.
+    Actor command NMAE on encoded (received) embeddings vs action labels.
 
-    Uses untouched actor-test trajectories: x → frozen Ψθ → Cε → ũ vs teacher u.
-    Multi-step prediction NMAE is evaluate_prediction_horizon_nmae (Eq. 27).
+    ``dp_teacher``: untouched actor-test teacher commands (plan §15 BC gate).
+    ``lqr``: discrete LQR on the stored plant state at the same timestep.
+    LQR labels are for working-overlay DAgger; they are not the paper BC target.
     """
+    labels = str(command_labels or "dp_teacher")
+    if labels not in {"dp_teacher", "lqr"}:
+        raise ValueError(f"command_labels must be 'dp_teacher' or 'lqr', got {labels!r}")
     root = data_root or (project_root(config) / config["paths"]["data_root"])
     normalizer = load_command_normalizer(config, data_root=root)
     test_dir = root / "trajectories" / "actor" / "test"
@@ -579,16 +585,32 @@ def evaluate_actor_nmae(
     device = controller.device
     jepa = controller.jepa
     actor = controller.actor
+    lqr_gain = None
+    if labels == "lqr":
+        from ts_jepa.control.lqr import lqr_forces, lqr_gain_from_config
+
+        lqr_gain = lqr_gain_from_config(config)
 
     preds: list[np.ndarray] = []
     tgts: list[np.ndarray] = []
     for batch in loader:
         context = batch["context"].to(device)
-        teacher_phys = batch["teacher_commands"][:, 0].cpu().numpy().reshape(-1)
         z = jepa.encode_context(context)
         u_phys = actor(z).cpu().numpy().reshape(-1)
         preds.append(np.asarray(u_phys).reshape(-1))
-        tgts.append(teacher_phys)
+        if labels == "lqr":
+            if "state" not in batch:
+                raise RuntimeError("LQR NMAE needs trajectory states; regenerate actor test npz with states.")
+            tgts.append(
+                lqr_forces(
+                    lqr_gain,
+                    batch["state"].numpy(),
+                    float(config["simulation"]["control_min_N"]),
+                    float(config["simulation"]["control_max_N"]),
+                )
+            )
+        else:
+            tgts.append(batch["teacher_commands"][:, 0].cpu().numpy().reshape(-1))
 
     if not preds:
         return {
@@ -596,12 +618,19 @@ def evaluate_actor_nmae(
             "num_values": 0,
             "split": "actor_test_untouched",
             "plan_section": "15",
+            "command_labels": labels,
         }
 
     pred = np.concatenate(preds)
     tgt = np.concatenate(tgts)
     force_range = physical_force_range_n(config)
-    mean_baseline_pred = np.full_like(tgt, float(normalizer.mean))
+    if labels == "lqr":
+        baseline_value = float(np.mean(tgt)) if tgt.size else 0.0
+        baseline_source = "mean_lqr_force_on_eval_states"
+    else:
+        baseline_value = float(normalizer.mean)
+        baseline_source = "jepa_train_command_mean_via_normalizer"
+    mean_baseline_pred = np.full_like(tgt, baseline_value)
     actor_nmae_value = nmae(pred, tgt, force_range_n=force_range)
     mean_baseline_nmae = nmae(mean_baseline_pred, tgt, force_range_n=force_range)
     return {
@@ -609,9 +638,10 @@ def evaluate_actor_nmae(
         "num_values": int(pred.size),
         "split": "actor_test_untouched",
         "plan_section": "15",
+        "command_labels": labels,
         "mean_abs_error": float(np.mean(np.abs(pred - tgt))),
         "mean_command_baseline_nmae": float(mean_baseline_nmae),
-        "mean_command_baseline_source": "jepa_train_command_mean_via_normalizer",
+        "mean_command_baseline_source": baseline_source,
         "beats_mean_command_baseline": bool(
             np.isfinite(actor_nmae_value)
             and np.isfinite(mean_baseline_nmae)
