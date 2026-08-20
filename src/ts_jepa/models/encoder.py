@@ -93,6 +93,8 @@ class ContextEncoder(nn.Module):
         return nn.Sequential(*blocks)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.device.type == "cuda" and x.dim() == 4:
+            x = x.contiguous(memory_format=torch.channels_last)
         x = self.stem(x)
         x = self.stage64(x)
         x = self.stage128(x)

@@ -18,6 +18,7 @@ from ts_jepa.data.temporal import (
 from ts_jepa.plan.enforce import jepa_uses_kappa_stack
 from ts_jepa.preprocessing.command_stats import CommandNormalizer
 from ts_jepa.preprocessing.pipeline import PreprocessPipeline
+from ts_jepa.runtime import resolve_encoder_batch_size
 
 
 def assert_native_frame_hw(frames: np.ndarray, config: dict[str, Any], *, source: str = "") -> None:
@@ -91,9 +92,10 @@ class TrajectoryDataset(Dataset):
         self._eval_cache: list[list[torch.Tensor] | None] = [None] * len(self.files)
         if not training:
             for file_idx, frames in enumerate(self.frames):
-                self._eval_cache[file_idx] = [
-                    self.pipeline.process_frame(frames[t], stochastic=False) for t in range(frames.shape[0])
-                ]
+                cached = self.pipeline.process_frames_cached(
+                    frames, 0, int(frames.shape[0]) - 1, stochastic=False
+                )
+                self._eval_cache[file_idx] = [cached[t] for t in range(frames.shape[0])]
 
     def __len__(self) -> int:
         return len(self.index_map)
@@ -171,30 +173,31 @@ class ActorEmbeddingDataset(Dataset):
         self.samples: list[tuple[torch.Tensor, float, float]] = []
 
         encoder.eval()
+        encode_bs = resolve_encoder_batch_size(device, config.get("runtime"))
         with torch.no_grad():
             for file_path in self.files:
                 with np.load(file_path) as data:
                     frames = np.asarray(data["frames"])
                     commands = np.asarray(data["commands"], dtype=np.float32)
                 assert_native_frame_hw(frames, config, source=str(file_path))
-                cached = [self.pipeline.process_frame(frames[t], stochastic=False) for t in range(len(commands))]
-                batch_contexts = []
-                batch_cmds_phys = []
-                batch_cmds_norm = []
-                for time_index in range(len(commands)):
-                    batch_contexts.append(self.pipeline.assemble_jepa_input(cached, time_index))
-                    phys = float(commands[time_index])
-                    batch_cmds_phys.append(phys)
-                    batch_cmds_norm.append(
-                        float(self.normalizer.normalize(np.array([phys], dtype=np.float32))[0])
+                cached = self.pipeline.process_frames_cached(
+                    frames, 0, len(commands) - 1, stochastic=False
+                )
+                batch_contexts = [
+                    self.pipeline.assemble_jepa_input(cached, time_index)
+                    for time_index in range(len(commands))
+                ]
+                cmds_phys = commands.astype(np.float32, copy=False)
+                cmds_norm = self.normalizer.normalize(cmds_phys)
+                for start in range(0, len(batch_contexts), encode_bs):
+                    chunk = torch.stack(batch_contexts[start : start + encode_bs], dim=0).to(
+                        device, non_blocking=device.type == "cuda"
                     )
-                bs = 64
-                for start in range(0, len(batch_contexts), bs):
-                    chunk = torch.stack(batch_contexts[start : start + bs], dim=0).to(device)
                     emb = encoder(chunk).detach().cpu()
                     for i in range(emb.shape[0]):
+                        idx = start + i
                         self.samples.append(
-                            (emb[i].clone(), batch_cmds_phys[start + i], batch_cmds_norm[start + i])
+                            (emb[i].clone(), float(cmds_phys[idx]), float(cmds_norm[idx]))
                         )
 
     def __len__(self) -> int:

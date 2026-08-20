@@ -210,17 +210,26 @@ def jepa_sgd_and_ema_step(
     model: TSJEPA,
     optimizer: torch.optim.Optimizer,
     max_grad_norm: float | None = None,
+    scaler: torch.amp.GradScaler | None = None,
 ) -> None:
     """
     Plan §10 Algorithm 1 steps 5–6: SGD on θ,ϕ then EMA on θ̄.
 
     Call once per effective batch (after gradient accumulation completes).
     ``max_grad_norm`` is an implementation choice (Table II is silent).
+    ``scaler`` is only used for fp16 AMP.
     """
     # Step 5 — gradient update (θ, ϕ only; optimizer was built that way)
-    if max_grad_norm is not None and float(max_grad_norm) > 0.0:
-        torch.nn.utils.clip_grad_norm_(jepa_trainable_parameters(model), float(max_grad_norm))
-    optimizer.step()
+    if scaler is not None:
+        if max_grad_norm is not None and float(max_grad_norm) > 0.0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(jepa_trainable_parameters(model), float(max_grad_norm))
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        if max_grad_norm is not None and float(max_grad_norm) > 0.0:
+            torch.nn.utils.clip_grad_norm_(jepa_trainable_parameters(model), float(max_grad_norm))
+        optimizer.step()
     # Step 6 — EMA target update
     model.ema_step()
     optimizer.zero_grad(set_to_none=True)

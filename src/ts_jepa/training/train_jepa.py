@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -30,15 +31,19 @@ from ts_jepa.runtime import (
     TrainProgressWatchdog,
     inprocess_dataloader,
     is_dataloader_spawn_error,
+    channels_last_enabled,
     configure_train_logging,
     configure_training_runtime,
     format_exception,
     gpu_mem_str,
     load_checkpoint,
     make_dataloader,
+    recommended_jepa_microbatch,
     release_cuda_cache,
     reraise_cuda_context,
+    resolve_amp_dtype,
     save_checkpoint,
+    should_release_cuda_cache,
     state_dict_to_cpu,
 )
 
@@ -209,7 +214,12 @@ def _load_completed_seed_result(run_dir: Path) -> dict[str, Any]:
     }
 
 
-def resolve_jepa_batching(opt_cfg: dict[str, Any]) -> tuple[int, int, int]:
+def resolve_jepa_batching(
+    opt_cfg: dict[str, Any],
+    *,
+    device: torch.device | None = None,
+    runtime_cfg: dict[str, Any] | None = None,
+) -> tuple[int, int, int]:
     """
     Paper effective batch vs GPU microbatch.
 
@@ -217,11 +227,21 @@ def resolve_jepa_batching(opt_cfg: dict[str, Any]) -> tuple[int, int, int]:
     Gradients are accumulated so one optimizer/EMA step covers `effective_batch_size`
     samples. If `microbatch_size` is omitted, it defaults to `batch_size` (no accum).
     If `microbatch_size` exceeds `batch_size` (tiny smoke overrides), it is clamped.
+
+    When ``runtime.auto_tune_microbatch`` is on (default) and ``device`` is CUDA,
+    microbatch is raised to the largest divisor of the paper batch that fits VRAM
+    (256 on RTX 6000 Ada-class 48 GB cards).
     """
     effective = int(opt_cfg["batch_size"])
-    micro = int(opt_cfg.get("microbatch_size", effective))
+    raw_micro = opt_cfg.get("microbatch_size", effective)
     if effective < 1:
         raise ValueError(f"batch_size must be >= 1, got {effective}")
+    runtime = runtime_cfg or {}
+    auto = bool(runtime.get("auto_tune_microbatch", True))
+    if device is not None and auto and str(raw_micro).strip().lower() != "off":
+        micro = recommended_jepa_microbatch(effective, device)
+    else:
+        micro = int(raw_micro)
     if micro < 1:
         raise ValueError(f"microbatch_size must be >= 1, got {micro}")
     if micro > effective:
@@ -266,11 +286,19 @@ def _split_train_val(dataset: TrajectoryDataset, val_traj_count: int) -> tuple[S
     return Subset(dataset, train_idx), Subset(dataset, val_idx)
 
 
+def _cuda_autocast(device: torch.device, dtype: torch.dtype | None):
+    if dtype is None or device.type != "cuda":
+        return nullcontext()
+    return torch.autocast(device_type="cuda", dtype=dtype)
+
+
 @torch.no_grad()
 def evaluate_cosine_loss(
     model: TSJEPA,
     loader: DataLoader,
     device: torch.device,
+    *,
+    amp_dtype: torch.dtype | None = None,
 ) -> float:
     model.eval()
     resolution = model.command_resolution
@@ -280,18 +308,19 @@ def evaluate_cosine_loss(
     try:
         for batch in prefetcher:
             # Plan §10 Algorithm 1 steps 1–4 (eval; no SGD/EMA).
-            result = jepa_forward_batch(model, batch, resolution)
+            with _cuda_autocast(device, amp_dtype):
+                result = jepa_forward_batch(model, batch, resolution)
             contrast_w = float(getattr(model, "command_contrast_weight", 0.0) or 0.0)
             total += float(result.cosine_loss.item()) + contrast_w * float(result.command_contrast.item())
             n_batches += 1
             del result
     except DataLoaderStallError as exc:
         if int(getattr(loader, "num_workers", 0) or 0) > 0 and is_dataloader_spawn_error(exc):
-            return evaluate_cosine_loss(model, inprocess_dataloader(loader), device)
+            return evaluate_cosine_loss(model, inprocess_dataloader(loader), device, amp_dtype=amp_dtype)
         raise
     except Exception as exc:
         if int(getattr(loader, "num_workers", 0) or 0) > 0 and is_dataloader_spawn_error(exc):
-            return evaluate_cosine_loss(model, inprocess_dataloader(loader), device)
+            return evaluate_cosine_loss(model, inprocess_dataloader(loader), device, amp_dtype=amp_dtype)
         reraise_cuda_context(exc, where=f"evaluate_cosine_loss after {n_batches} batches", device=device)
     finally:
         prefetcher.close()
@@ -402,7 +431,15 @@ def _train_ts_jepa_body(
     train_set, val_set = _split_train_val(train_dataset, val_count)
 
     opt_cfg = config["ts_jepa"]["optimizer"]
-    effective_bs, micro_bs, accum_steps = resolve_jepa_batching(opt_cfg)
+    runtime_cfg = config.get("runtime", {})
+    effective_bs, micro_bs, accum_steps = resolve_jepa_batching(
+        opt_cfg, device=device, runtime_cfg=runtime_cfg
+    )
+    amp_dtype = resolve_amp_dtype(device, runtime_cfg)
+    use_channels_last = channels_last_enabled(device, runtime_cfg)
+    scaler = None
+    if amp_dtype is torch.float16:
+        scaler = torch.amp.GradScaler("cuda")
     # drop_last only when the split is large enough; smoke tests may be tiny.
     drop_last = len(train_set) >= effective_bs
     train_loader = make_dataloader(
@@ -438,10 +475,22 @@ def _train_ts_jepa_body(
     watchdog.log(
         f"data train={len(train_set)} val={len(val_set)} test={len(test_dataset)} "
         f"effective_bs={effective_bs} micro={micro_bs} accum={accum_steps} "
-        f"micros/epoch={n_micros_used} steps/epoch={n_effective} leftover={n_leftover}"
+        f"micros/epoch={n_micros_used} steps/epoch={n_effective} leftover={n_leftover} "
+        f"amp={str(amp_dtype).replace('torch.', '') if amp_dtype is not None else 'off'} "
+        f"channels_last={use_channels_last}"
     )
 
     model = TSJEPA(config).to(device)
+    if use_channels_last:
+        model.context_encoder.to(memory_format=torch.channels_last)
+        model.target_encoder.to(memory_format=torch.channels_last)
+    chunk_cfg = runtime_cfg.get("target_encode_chunk_size", "auto")
+    if chunk_cfg in {"auto", None} or (
+        isinstance(chunk_cfg, str) and chunk_cfg.strip().lower() == "auto"
+    ):
+        model.target_encode_chunk_size = 0
+    else:
+        model.target_encode_chunk_size = int(chunk_cfg)
     attach_command_norm_range(model, normalizer, config)
     resolution = model.command_resolution
     watchdog.log(
@@ -559,12 +608,17 @@ def _train_ts_jepa_body(
                 watchdog.touch(micro=micros_seen, stage="forward")
                 try:
                     # Plan §10 Algorithm 1 steps 1–4 (context → target stop-grad → predict → loss).
-                    result = jepa_forward_batch(model, batch, resolution)
-                    task_loss = result.cosine_loss + contrast_w * result.command_contrast
-                    loss_bwd = task_loss if vicreg_on_effective else result.loss
+                    with _cuda_autocast(device, amp_dtype):
+                        result = jepa_forward_batch(model, batch, resolution)
+                        task_loss = result.cosine_loss + contrast_w * result.command_contrast
+                        loss_bwd = task_loss if vicreg_on_effective else result.loss
                     # Scale so accumulated grads match mean loss over the effective batch.
                     watchdog.touch(micro=micros_seen, stage="backward")
-                    (loss_bwd / accum_steps).backward()
+                    scaled = loss_bwd / accum_steps
+                    if scaler is not None:
+                        scaler.scale(scaled).backward()
+                    else:
+                        scaled.backward()
                 except Exception as exc:
                     reraise_cuda_context(
                         exc,
@@ -605,14 +659,18 @@ def _train_ts_jepa_body(
                     step_loss = float(group_loss_sum.item()) / accum_steps
                     if vicreg_on_effective:
                         z_all = model.encode_context(torch.cat(group_contexts, dim=0))
-                        vicreg, var_term, cov_term = vicreg_regularizer(
-                            z_all,
-                            variance_weight=var_w,
-                            covariance_weight=cov_w,
-                            gamma=gamma,
-                            covariance_standardize=cov_stdize,
-                        )
-                        vicreg.backward()
+                        with _cuda_autocast(device, amp_dtype):
+                            vicreg, var_term, cov_term = vicreg_regularizer(
+                                z_all,
+                                variance_weight=var_w,
+                                covariance_weight=cov_w,
+                                gamma=gamma,
+                                covariance_standardize=cov_stdize,
+                            )
+                        if scaler is not None:
+                            scaler.scale(vicreg).backward()
+                        else:
+                            vicreg.backward()
                         var_v = float(var_term.detach())
                         cov_v = float(cov_term.detach())
                         step_loss = float(cosine_v) + contrast_w * float(contrast_v) + float(vicreg.detach())
@@ -621,6 +679,7 @@ def _train_ts_jepa_body(
                         model,
                         optimizer,
                         max_grad_norm=float(opt_cfg.get("grad_clip_norm", 0.0)) or None,
+                        scaler=scaler,
                     )
                 except Exception as exc:
                     reraise_cuda_context(
@@ -684,7 +743,7 @@ def _train_ts_jepa_body(
             f"starting val GPU={gpu_mem_str(device)}"
         )
         try:
-            val_loss = evaluate_cosine_loss(model, val_loader, device)
+            val_loss = evaluate_cosine_loss(model, val_loader, device, amp_dtype=amp_dtype)
         except Exception as exc:
             reraise_cuda_context(exc, where=f"jepa epoch {epoch} validation", device=device)
         history.append(
@@ -755,8 +814,9 @@ def _train_ts_jepa_body(
             ),
         )
         watchdog.log(f"saved last.pt epoch={epoch}")
-        release_cuda_cache(device)
-        watchdog.log(f"epoch={epoch} cache_released GPU={gpu_mem_str(device)}")
+        if should_release_cuda_cache(device, runtime_cfg):
+            release_cuda_cache(device)
+            watchdog.log(f"epoch={epoch} cache_released GPU={gpu_mem_str(device)}")
 
     if best_state is not None:
         model.load_state_dict(best_state)
@@ -764,7 +824,7 @@ def _train_ts_jepa_body(
     # Untouched test set: report only; never used for checkpoint selection.
     watchdog.set_stage("test")
     try:
-        test_loss = evaluate_cosine_loss(model, test_loader, device)
+        test_loss = evaluate_cosine_loss(model, test_loader, device, amp_dtype=amp_dtype)
     except Exception as exc:
         reraise_cuda_context(exc, where="jepa untouched test", device=device)
     payload = _resumable_checkpoint_payload(

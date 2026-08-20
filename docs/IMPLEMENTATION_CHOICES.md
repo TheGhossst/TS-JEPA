@@ -242,21 +242,25 @@ Aligned with `docs/plan.md` §5; verified by `assert_plan_preprocessing_config()
 | Choice | Value | Notes |
 |--------|-------|-------|
 | Effective JEPA batch | `256` | paper-specified; one `optimizer.step()` / EMA update per 256 samples |
-| Microbatch size | `16` (default IC) | forward/backward chunk size for 8 GB GPUs; try `32` if VRAM allows |
+| Microbatch size | auto-tuned IC | fallback `16` (8 GB); `32` / `64` / `128` / `256` from installed VRAM. RTX 6000 Ada (48 GB) uses **256** (no accumulation) |
 | Accumulation | `batch_size / microbatch_size` | loss scaled by `1/accumulation` so grads match mean over 256 |
 | Leftover micros | dropped | e.g. 956 micros → 59×16 used, 12 leftover never `optimizer.step()` |
-| Target-encoder chunking | `256` frames | eval/no-grad; BN running stats; does not change outputs |
+| Target-encoder chunking | one launch (auto) | `256` frames was an 8 GB cap; large GPUs encode `B×Kp` at once |
+| AMP | `bf16` on sm≥8 (Ada/Ampere) | IC throughput; set `runtime.amp: off` for fp32 |
+| Channels-last | on (CUDA) | NHWC convs for Tensor Cores |
 | BatchNorm | unchanged ResNet BN | BN stats still update on microbatches in train mode (no SyncBN / GhostBN) |
 
-## Laptop runtime (Windows + RTX 5070 8 GB)
+## CUDA runtime (Windows laptop 8 GB **or** workstation 48 GB)
 
 | Choice | Value | Notes |
 |--------|-------|-------|
-| DataLoader `num_workers` | `4` on CUDA, `0` on CPU | overlaps aug/preprocess with GPU; CPU/tests stay single-process |
-| `pin_memory` + CUDA prefetch | on | hides H2D copy latency |
+| DataLoader `num_workers` | `auto` | CUDA: up to 8 (Windows) / 12 (Linux); CPU/tests stay 0 |
+| `pin_memory` + CUDA prefetch | on | hides H2D copy latency (including `num_workers=0`) |
+| `prefetch_factor` | `4` | keep the Ada-class GPU fed while workers preprocess |
 | `dataloader_timeout_s` | `120` | PyTorch worker queue timeout; raises instead of silent mid-epoch hang |
 | `heartbeat_s` / `stall_timeout_s` | `30` / `180` | stdout + `runs/*/train.log` heartbeats; STALL lines when progress stops |
 | `cudnn.benchmark` | on | fixed 64×128 shapes |
+| CUDA cache | `empty_cache` only if VRAM < 12 GB | per-epoch flush stalls 48 GB cards |
 | Checkpoint I/O | CPU `state_dict` + `cuda.synchronize` before `torch.save` | mitigates WDDM access-violation crashes mid-epoch |
 | Loss `.item()` | once per effective step | avoids forcing a GPU sync every microbatch |
 | Eval artifacts | `runs/eval/{baseline,nmae,closed_loop,embedding_tsne,baseline_validation}_*` + PNG plots | wireless only after baseline validation `PASS` |

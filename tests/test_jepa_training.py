@@ -19,6 +19,7 @@ from ts_jepa.training.jepa_optimizer import (
     should_apply_jepa_lr_decay,
 )
 from ts_jepa.training.jepa_training_plan import PLAN_JEPA_TRAINING, assert_plan_jepa_training_config
+from ts_jepa.training.train_jepa import resolve_jepa_batching
 
 
 def test_plan_jepa_training_config_matches_baseline_yaml():
@@ -172,3 +173,11 @@ def test_plan_jepa_training_rejects_wrong_repetition_count():
     config["evaluation"]["repetitions"] = 1
     with pytest.raises(ValueError, match="repetitions"):
         assert_plan_jepa_training_config(config)
+
+
+def test_resolve_jepa_batching_auto_tune_off_keeps_yaml_microbatch():
+    opt = {"batch_size": 256, "microbatch_size": 16}
+    effective, micro, accum = resolve_jepa_batching(
+        opt, device=torch.device("cpu"), runtime_cfg={"auto_tune_microbatch": False}
+    )
+    assert (effective, micro, accum) == (256, 16, 16)

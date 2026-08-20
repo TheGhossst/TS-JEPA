@@ -29,7 +29,9 @@ from ts_jepa.runtime import (
     make_dataloader,
     release_cuda_cache,
     reraise_cuda_context,
+    resolve_amp_dtype,
     save_checkpoint,
+    should_release_cuda_cache,
     state_dict_to_cpu,
 )
 
@@ -144,6 +146,8 @@ def _train_semantic_actor_body(
             jepa_run_dirname(config),
         )
     ckpt_path = ckpt_path.resolve()
+    runtime_cfg = config.get("runtime", {})
+    amp_dtype = resolve_amp_dtype(device, runtime_cfg)
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     jepa = TSJEPA(config).to(device)
     jepa.load_state_dict(ckpt["model"])
@@ -241,8 +245,13 @@ def _train_semantic_actor_body(
                 try:
                     emb = batch["embedding"]
                     target = batch["command"]
-                    pred = actor(emb)
-                    loss = criterion(pred, target)
+                    if amp_dtype is not None and device.type == "cuda":
+                        with torch.autocast(device_type="cuda", dtype=amp_dtype):
+                            pred = actor(emb)
+                            loss = criterion(pred, target)
+                    else:
+                        pred = actor(emb)
+                        loss = criterion(pred, target)
                     optimizer.zero_grad(set_to_none=True)
                     loss.backward()
                     optimizer.step()
@@ -270,7 +279,8 @@ def _train_semantic_actor_body(
             reraise_cuda_context(exc, where=f"actor epoch {epoch} validation", device=device)
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
         watchdog.log(f"epoch={epoch} train_loss={train_loss:.6f} val_loss={val_loss:.6f}")
-        release_cuda_cache(device)
+        if should_release_cuda_cache(device, runtime_cfg):
+            release_cuda_cache(device)
 
         if val_loss < best_val:
             best_val = val_loss

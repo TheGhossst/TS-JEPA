@@ -841,7 +841,7 @@ Paper notation uses predicted commands `ũ` during predictor training; the pretr
 | Method | Behavior |
 |--------|----------|
 | `encode_context(x)` | Ψθ forward |
-| `encode_targets(future, chunk_size=256)` | Ψθ̄, no grad, reshape Kp |
+| `encode_targets(future)` | Ψθ̄, no grad; chunk only if `target_encode_chunk_size` > 0 |
 | `predict(z, u_norm, horizon=None)` | Pφ AR, default `self.kp=15` |
 | `ema_step()` | EMA context → target |
 
@@ -984,15 +984,17 @@ From `runtime.*` / `configure_training_runtime`:
 
 | Item | Value |
 |------|-------|
-| DataLoader workers | 4 on CUDA, 0 on CPU |
-| `pin_memory` | true (CUDA) |
+| DataLoader workers | `auto` on CUDA (≤8 Win / ≤12 Linux), 0 on CPU |
+| `pin_memory` | true (CUDA, including 0-worker eval) |
 | `persistent_workers` | true |
-| `prefetch_factor` | 2 |
+| `prefetch_factor` | 4 |
 | `dataloader_timeout_s` | 120 |
 | Heartbeat / stall | 30 s / 180 s → stdout + `train.log` |
 | `cudnn.benchmark` | true (fixed 64×128) |
 | TF32 | allowed on CUDA |
-| CUDA cache | `empty_cache` after each epoch; shared prefetch stream; log alloc/reserved/free |
+| AMP | bf16 on sm≥8 (`runtime.amp: auto`) |
+| Microbatch | auto-tuned to VRAM; paper batch 256 unchanged |
+| CUDA cache | `empty_cache` after each epoch only if VRAM < 12 GB |
 | Checkpoint I/O | CPU `state_dict` + sync before `torch.save` |
 | Prefetch | `CUDAPrefetcher` overlaps H2D with compute |
 

@@ -8,9 +8,36 @@ from ts_jepa.inference.infer import FrozenRuntimeController, RuntimeCommandStats
 from ts_jepa.models.actor import SemanticActor
 from ts_jepa.models.ts_jepa import TSJEPA
 from ts_jepa.preprocessing.command_stats import CommandNormalizer
+from ts_jepa.runtime import (
+    CUDAPrefetcher,
+    recommended_jepa_microbatch,
+    resolve_amp_dtype,
+    resolve_num_workers,
+)
 from torch.utils.data import DataLoader, Dataset
 
-from ts_jepa.runtime import CUDAPrefetcher
+
+def test_recommended_jepa_microbatch_cpu_keeps_laptop_fallback():
+    assert recommended_jepa_microbatch(256, torch.device("cpu")) == 16
+    assert recommended_jepa_microbatch(2, torch.device("cpu")) == 2
+
+
+def test_resolve_amp_dtype_off_on_cpu():
+    assert resolve_amp_dtype(torch.device("cpu"), {"amp": "auto"}) is None
+    assert resolve_amp_dtype(torch.device("cpu"), {"amp": "bf16"}) is None
+
+
+def test_resolve_num_workers_cpu_is_zero():
+    assert resolve_num_workers({"runtime": {"num_workers": "auto"}}, torch.device("cpu")) == 0
+    assert resolve_num_workers({"runtime": {"num_workers": 8}}, torch.device("cpu")) == 0
+
+
+def test_recommended_jepa_microbatch_48gb_ada_uses_full_paper_batch(monkeypatch):
+    from ts_jepa import runtime as rt
+
+    monkeypatch.setattr(rt, "gpu_total_memory_gb", lambda _device: 48.0)
+    assert rt.recommended_jepa_microbatch(256, torch.device("cuda")) == 256
+    assert rt.recommended_jepa_microbatch(256, torch.device("cuda")) % 256 == 0
 
 
 class _DictTensorDataset(Dataset):

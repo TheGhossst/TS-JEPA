@@ -140,6 +140,16 @@ def test_gaussian_resize_always_downsamples_native_frames():
     assert not torch.allclose(out, crop, atol=1e-3)
 
 
+def test_eval_gaussian_resize_batch_matches_per_frame():
+    config = load_config()
+    frames = np.random.randint(0, 255, size=(5, 128, 256, 3), dtype=np.uint8)
+    pipe = PreprocessPipeline(config, training=False)
+    batched = pipe.process_frames_cached(frames, 0, 4, stochastic=False)
+    for t in range(5):
+        single = pipe.process_frame(frames[t], stochastic=False)
+        assert torch.allclose(batched[t], single, atol=1e-5)
+
+
 def test_native_frame_resizes_to_encoder_hw():
     config = load_config()
     frame = np.random.randint(0, 255, size=(128, 256, 3), dtype=np.uint8)

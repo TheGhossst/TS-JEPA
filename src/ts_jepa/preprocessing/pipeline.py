@@ -105,8 +105,10 @@ class PreprocessPipeline:
         return torch.stack([luma, luma, luma], dim=0)
 
     def _normalize(self, img: torch.Tensor) -> torch.Tensor:
-        """Plan §5.1 / §5.2 ImageNet normalization."""
-        return (img - self.mean) / self.std
+        """Plan §5.1 / §5.2 ImageNet normalization. Accepts [C,H,W] or [N,C,H,W]."""
+        mean = self.mean.to(device=img.device, dtype=img.dtype)
+        std = self.std.to(device=img.device, dtype=img.dtype)
+        return (img - mean) / std
 
     def _gaussian_resize(self, img: torch.Tensor, rng: np.random.Generator | None = None) -> torch.Tensor:
         """
@@ -114,21 +116,32 @@ class PreprocessPipeline:
         (σ ~ U[0.1, 0.2] in training; midpoint σ when rng is None).
 
         This is Gaussian-kernel resampling in input coordinates, not blur-then-bilinear.
+        ``img`` may be [C,H,W] or a batch [N,C,H,W] (shared σ).
         """
         if rng is None:
             sigma = 0.5 * (float(self.sigma_range[0]) + float(self.sigma_range[1]))
         else:
             sigma = float(rng.uniform(self.sigma_range[0], self.sigma_range[1]))
+        return self._gaussian_resize_sigma(img, sigma)
+
+    def _gaussian_resize_sigma(self, img: torch.Tensor, sigma: float) -> torch.Tensor:
+        squeezed = False
+        if img.dim() == 3:
+            img = img.unsqueeze(0)
+            squeezed = True
+        if img.dim() != 4:
+            raise ValueError(f"gaussian resize expects [C,H,W] or [N,C,H,W], got {tuple(img.shape)}")
+        _n, _c, in_h, in_w = img.shape
         out_h, out_w = self.resize_hw
-        _c, in_h, in_w = img.shape
         k_h, k_w = self.gaussian_kernel
         device, dtype = img.device, img.dtype
         cy = (torch.arange(out_h, device=device, dtype=dtype) + 0.5) * (in_h / float(out_h)) - 0.5
         cx = (torch.arange(out_w, device=device, dtype=dtype) + 0.5) * (in_w / float(out_w)) - 0.5
         wy, iy = self._gaussian_1d_weights(cy, in_h, sigma, k_h)
         wx, ix = self._gaussian_1d_weights(cx, in_w, sigma, k_w)
-        gathered = img[:, iy[:, :, None, None], ix[None, None, :, :]]
-        return torch.einsum("ciajb,ia,jb->cij", gathered, wy, wx)
+        gathered = img[:, :, iy[:, :, None, None], ix[None, None, :, :]]
+        out = torch.einsum("nciajb,ia,jb->ncij", gathered, wy, wx)
+        return out[0] if squeezed else out
 
     def process_frame(
         self,
@@ -156,7 +169,15 @@ class PreprocessPipeline:
         stochastic: bool | None = None,
     ) -> dict[int, torch.Tensor]:
         """Process inclusive frame indices once and return a cache."""
-        return {t: self.process_frame(frames[t], stochastic=stochastic) for t in range(start, end + 1)}
+        use_aug = self.training if stochastic is None else stochastic
+        if use_aug:
+            return {t: self.process_frame(frames[t], stochastic=True) for t in range(start, end + 1)}
+        idxs = list(range(int(start), int(end) + 1))
+        if not idxs:
+            return {}
+        stacked = torch.stack([self._decode_frame(frames[t]) for t in idxs], dim=0)
+        stacked = self._gaussian_resize(self._normalize(stacked), rng=None)
+        return {t: stacked[i] for i, t in enumerate(idxs)}
 
     def assemble_jepa_frame(self, processed: dict[int, torch.Tensor], time_index: int) -> torch.Tensor:
         """Algorithm 1: one RGB frame → [3, 64, 128] for Ψ(x_{i,k})."""

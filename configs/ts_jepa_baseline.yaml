@@ -10,13 +10,19 @@ paths:
   data_root: data
   runs_root: runs
 
-# Laptop runtime (IMPLEMENTATION CHOICE — not paper hyperparameters)
+# Laptop / workstation runtime (IMPLEMENTATION CHOICE — not paper hyperparameters)
 runtime:
-  num_workers: 4          # 0 on CPU/tests; CUDA default feeds GPU on i7+32GB
+  num_workers: auto       # CUDA: 8 on Windows / 12 on Linux, capped by CPU count; 0 on CPU
   pin_memory: true
   persistent_workers: true
-  prefetch_factor: 2
+  prefetch_factor: 4
   cudnn_benchmark: true
+  auto_tune_microbatch: true  # raise microbatch to fill VRAM; paper effective batch stays 256
+  amp: auto                   # bf16 on Ampere/Ada/Hopper; fp32 otherwise. Set off for bit-exact fp32
+  channels_last: true         # NHWC convs for Tensor Cores
+  target_encode_chunk_size: auto  # 0 = encode all Kp target frames in one launch
+  encoder_batch_size: auto    # frozen-encoder embedding extraction
+  release_cuda_cache_each_epoch: auto  # only on <12 GB cards; empty_cache stalls 48 GB GPUs
   dataloader_timeout_s: 120   # IC — raise instead of hanging forever on dead workers
   heartbeat_s: 30             # IC — progress / STALL lines to stdout + runs/*/train.log
   stall_timeout_s: 180        # IC — emit STALL if no microbatch progress this long
@@ -197,7 +203,7 @@ ts_jepa:
     learning_rate: 0.2
     lr_warmup_epochs: 10  # IC — linear warmup 0.02→0.2; Table II is silent; stabilizes EMA under lr=0.2
     batch_size: 256  # paper effective batch; gradients accumulated to this size
-    microbatch_size: 16  # IC — GPU memory; accumulation = batch_size / microbatch_size
+    microbatch_size: 16  # IC fallback for 8 GB; runtime.auto_tune_microbatch overrides on large GPUs
     epochs: 150
     weight_decay: 0.0004
     weight_decay_exclude_batchnorm: true  # IC — Table II does not mention BN; WD on BN affine oscillates cosine JEPA

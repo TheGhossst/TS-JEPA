@@ -75,6 +75,18 @@ def main() -> None:
         action="store_true",
         help="Resume from the default last.pt for --single-seed in the current run directory.",
     )
+    parser.add_argument(
+        "--microbatch-size",
+        type=int,
+        default=None,
+        help="Override JEPA microbatch (paper effective batch stays 256). Disables auto-tune.",
+    )
+    parser.add_argument(
+        "--amp",
+        type=str,
+        default=None,
+        help="Mixed precision: auto|bf16|fp16|off (default: config runtime.amp).",
+    )
     args = parser.parse_args()
     config = load_config(args.config)
     assert_plan_environment_validated(config)
@@ -85,6 +97,11 @@ def main() -> None:
     assert_plan_jepa_training_config(config)
     assert_plan_jepa_procedure_config(config)
     apply_cli_path_overrides(config, data_root=args.data_root, runs_root=args.runs_root)
+    if args.microbatch_size is not None:
+        config.setdefault("runtime", {})["auto_tune_microbatch"] = False
+        config["ts_jepa"]["optimizer"]["microbatch_size"] = int(args.microbatch_size)
+    if args.amp is not None:
+        config.setdefault("runtime", {})["amp"] = args.amp
     device = select_device(args.device)
     resume_path = _resolve_resume_path(
         config,

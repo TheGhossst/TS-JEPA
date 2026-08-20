@@ -80,6 +80,8 @@ class TSJEPA(nn.Module):
         # Filled from the fitted CommandNormalizer + actuator limits at train start.
         self.command_norm_min = float("nan")
         self.command_norm_max = float("nan")
+        # IC: 0 = encode all target frames in one kernel launch (large VRAM).
+        self.target_encode_chunk_size = 0
 
     def train(self, mode: bool = True) -> TSJEPA:
         """Keep Ψθ̄ in eval. Plan §8: target is stop-grad + EMA, not a trained BN branch."""
@@ -91,19 +93,24 @@ class TSJEPA(nn.Module):
         return self.context_encoder(context)
 
     @torch.no_grad()
-    def encode_targets(self, future_frames: torch.Tensor, chunk_size: int = 256) -> torch.Tensor:
+    def encode_targets(self, future_frames: torch.Tensor, chunk_size: int | None = None) -> torch.Tensor:
         """
         Plan §8: target encoder forward with stop-gradient.
 
         future_frames: [B, Kp, C, H, W] → [B, Kp, D] (C=3 paper; C=6 κ-stack working).
+        ``chunk_size`` <= 0 (default) encodes the whole [B·Kp] tensor at once.
         """
         self.target_encoder.eval()
         b, kp, c, h, w = future_frames.shape
         flat = future_frames.reshape(b * kp, c, h, w)
-        chunks = []
-        for start in range(0, flat.shape[0], int(chunk_size)):
-            chunks.append(self.target_encoder(flat[start : start + int(chunk_size)]))
-        emb = torch.cat(chunks, dim=0)
+        limit = int(self.target_encode_chunk_size if chunk_size is None else chunk_size)
+        if limit <= 0 or limit >= flat.shape[0]:
+            emb = self.target_encoder(flat)
+        else:
+            chunks = []
+            for start in range(0, flat.shape[0], limit):
+                chunks.append(self.target_encoder(flat[start : start + limit]))
+            emb = torch.cat(chunks, dim=0)
         return emb.view(b, kp, -1)
 
     def predict(self, embedding: torch.Tensor, commands_norm: torch.Tensor, horizon: int | None = None) -> torch.Tensor:

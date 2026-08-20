@@ -26,6 +26,116 @@ class TrainingStallError(RuntimeError):
     """Raised when the training loop makes no progress for too long."""
 
 
+def gpu_total_memory_gb(device: torch.device) -> float | None:
+    """Installed VRAM in GiB, or None when CUDA is not usable."""
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return None
+    idx = int(device.index) if device.index is not None else 0
+    props = torch.cuda.get_device_properties(idx)
+    return float(props.total_memory) / float(1024**3)
+
+
+def gpu_compute_capability(device: torch.device) -> tuple[int, int] | None:
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return None
+    idx = int(device.index) if device.index is not None else 0
+    props = torch.cuda.get_device_properties(idx)
+    return int(props.major), int(props.minor)
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "off", "none", "no"}
+    return bool(value)
+
+
+def recommended_jepa_microbatch(effective: int, device: torch.device) -> int:
+    """
+    Largest divisor of the paper effective batch that the installed GPU can hold.
+
+    Effective batch (Table II: 256) is unchanged; this only drops gradient
+    accumulation on large cards (RTX 6000 Ada 48 GB → microbatch 256).
+    """
+    effective = int(effective)
+    if effective < 1:
+        raise ValueError(f"batch_size must be >= 1, got {effective}")
+    total_gb = gpu_total_memory_gb(device)
+    if total_gb is None:
+        target = min(16, effective)
+    elif total_gb >= 36:
+        target = effective  # 40–48 GB Ada / A6000-class: one full paper batch
+    elif total_gb >= 22:
+        target = min(128, effective)
+    elif total_gb >= 14:
+        target = min(64, effective)
+    elif total_gb >= 10:
+        target = min(32, effective)
+    else:
+        target = min(16, effective)
+    chosen = 1
+    for size in range(1, effective + 1):
+        if effective % size == 0 and size <= target:
+            chosen = size
+    return chosen
+
+
+def resolve_amp_dtype(device: torch.device, runtime: Mapping[str, Any] | None = None) -> torch.dtype | None:
+    """
+    Mixed precision for JEPA/actor forwards.
+
+    ``auto``: bfloat16 on Ampere/Ada/Hopper (sm>=8), else fp32.
+    Paper math is fp32; AMP is an IC throughput toggle (runtime.amp).
+    """
+    spec = (runtime or {}).get("amp", "auto")
+    if spec is None or spec is False:
+        return None
+    if isinstance(spec, str) and spec.strip().lower() in {"", "off", "fp32", "none", "false", "no"}:
+        return None
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return None
+    key = spec if not isinstance(spec, str) else spec.strip().lower()
+    if key in {True, "auto", "on", "true"}:
+        cc = gpu_compute_capability(device)
+        if cc is not None and cc[0] >= 8:
+            return torch.bfloat16
+        return None
+    if key in {"bf16", "bfloat16"}:
+        return torch.bfloat16
+    if key in {"fp16", "float16", "half"}:
+        return torch.float16
+    raise ValueError(f"runtime.amp must be auto|bf16|fp16|off, got {spec!r}")
+
+
+def channels_last_enabled(device: torch.device, runtime: Mapping[str, Any] | None = None) -> bool:
+    flag = (runtime or {}).get("channels_last", True)
+    return device.type == "cuda" and torch.cuda.is_available() and _truthy(flag)
+
+
+def should_release_cuda_cache(device: torch.device, runtime: Mapping[str, Any] | None = None) -> bool:
+    """empty_cache each epoch only on small WDDM cards; it stalls large GPUs."""
+    flag = (runtime or {}).get("release_cuda_cache_each_epoch", "auto")
+    if isinstance(flag, str) and flag.strip().lower() == "auto":
+        total = gpu_total_memory_gb(device)
+        return total is not None and total < 12.0
+    if flag is None:
+        return False
+    return _truthy(flag)
+
+
+def resolve_encoder_batch_size(device: torch.device, runtime: Mapping[str, Any] | None = None) -> int:
+    raw = (runtime or {}).get("encoder_batch_size", "auto")
+    if raw not in {"auto", None} and not (isinstance(raw, str) and raw.strip().lower() == "auto"):
+        return max(1, int(raw))
+    if device.type != "cuda":
+        return 64
+    total = gpu_total_memory_gb(device) or 8.0
+    if total >= 36:
+        return 2048
+    if total >= 16:
+        return 1024
+    return 256
+
+
 def configure_training_runtime(
     device: torch.device,
     *,
@@ -34,15 +144,15 @@ def configure_training_runtime(
     cpu_threads: int | None = None,
 ) -> dict[str, Any]:
     """
-    Tune PyTorch for a CUDA laptop without changing model math/hyperparameters.
+    Tune PyTorch for CUDA training without changing paper hyperparameters.
 
-    Targets: keep the GPU fed, avoid host oversubscription, enable cuDNN autotune
-    for fixed input shapes (64×128 JEPA tensors).
+    Keeps the GPU fed (TF32, cuDNN autotune, NHWC-ready alloc) and leaves
+    host cores for DataLoader workers.
     """
     info: dict[str, Any] = {"device": str(device)}
+    ncpu = os.cpu_count() or 8
     if cpu_threads is None:
-        # i7-14650HX-class: leave headroom for OS + DataLoader workers.
-        cpu_threads = max(4, min(12, (os.cpu_count() or 8) - 4))
+        cpu_threads = max(4, min(16, max(4, ncpu // 2)))
     torch.set_num_threads(int(cpu_threads))
     info["torch_num_threads"] = int(cpu_threads)
 
@@ -51,6 +161,10 @@ def configure_training_runtime(
 
     torch.backends.cudnn.benchmark = bool(cudnn_benchmark)
     info["cudnn_benchmark"] = bool(cudnn_benchmark)
+    cc = gpu_compute_capability(device)
+    info["gpu_name"] = torch.cuda.get_device_name(device)
+    info["compute_capability"] = None if cc is None else f"{cc[0]}.{cc[1]}"
+    info["gpu_memory_total_gb"] = gpu_total_memory_gb(device)
     if allow_tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -74,9 +188,12 @@ def resolve_num_workers(config: dict[str, Any] | None, device: torch.device) -> 
     if device.type != "cuda":
         return 0
     runtime = (config or {}).get("runtime", {})
-    if "num_workers" in runtime:
-        return max(0, int(runtime["num_workers"]))
-    return 4
+    raw = runtime.get("num_workers", "auto")
+    if raw in {"auto", None} or (isinstance(raw, str) and raw.strip().lower() == "auto"):
+        ncpu = os.cpu_count() or 8
+        cap = 8 if sys.platform == "win32" else 12
+        return max(2, min(cap, ncpu - 2))
+    return max(0, int(raw))
 
 
 def is_dataloader_spawn_error(exc: BaseException) -> bool:
@@ -128,7 +245,7 @@ def make_dataloader(
     runtime = (config or {}).get("runtime", {})
     workers = resolve_num_workers(config, device) if num_workers is None else max(0, int(num_workers))
     pin_memory = bool(runtime.get("pin_memory", device.type == "cuda"))
-    prefetch = int(runtime.get("prefetch_factor", 2))
+    prefetch = int(runtime.get("prefetch_factor", 4))
     # Avoid infinite hangs when a Windows spawn worker dies/deadlocks mid-epoch.
     timeout_s = float(runtime.get("dataloader_timeout_s", 120.0))
     kwargs: dict[str, Any] = {
@@ -137,7 +254,7 @@ def make_dataloader(
         "shuffle": shuffle,
         "num_workers": workers,
         "drop_last": drop_last,
-        "pin_memory": pin_memory and device.type == "cuda" and workers > 0,
+        "pin_memory": pin_memory and device.type == "cuda",
     }
     if workers > 0:
         kwargs["persistent_workers"] = bool(runtime.get("persistent_workers", True))
