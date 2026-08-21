@@ -143,6 +143,100 @@ class ProbeLQRRuntimeController:
         return u
 
 
+class ObserverLQRRuntimeController:
+    """RGB → frozen Ψθ → z → decoded (x, θ) → α-β observer → discrete LQR.
+
+    Memoryless z→velocity decodes are MSE-attenuated (R²≈0.45 for θ̇) and
+    attenuated velocity feedback destroys the loop even though extra *white*
+    force noise up to ±5 N does not (see runs/eval/lqr_noise_sensitivity.json
+    and runs/eval/velocity_observability_control.json). Positions decode well
+    (MAE ~0.008 m / 0.004 rad), so this controller ignores decoded velocities
+    entirely: it predicts the state with the discrete linearization and the
+    actually-applied force, then corrects positions with α-β gains. Velocity
+    information is accumulated across timesteps instead of read from one z.
+
+    Packet lost → predict-only step (no measurement correction), mirroring the
+    plan §14 miss path without using Pφ.
+    """
+
+    miss_behavior = "observer_predict_no_correction"
+
+    def __init__(
+        self,
+        encoder: FrozenRuntimeController,
+        probe: dict[str, Any],
+        gain: np.ndarray,
+        a: np.ndarray,
+        b: np.ndarray,
+        *,
+        alpha: float = 0.5,
+        beta: float = 0.3,
+        full_information: bool = False,
+    ) -> None:
+        self.encoder = encoder
+        self.probe = probe
+        self.gain = np.asarray(gain, dtype=np.float64).reshape(1, 4)
+        self.a = np.asarray(a, dtype=np.float64).reshape(4, 4)
+        self.b = np.asarray(b, dtype=np.float64).reshape(4)
+        self.alpha = float(alpha)
+        self.beta = float(beta)
+        self.full_information = bool(full_information)
+        self.force_min = encoder.stats.force_min
+        self.force_max = encoder.stats.force_max
+        stride = max(1, int(encoder.config["simulation"].get("observation_stride_steps", 1)))
+        self.dt_obs = float(stride) * float(encoder.config["simulation"]["dt"])
+        self.est: np.ndarray | None = None
+        self.last_u = 0.0
+
+    def reset_episode(self) -> None:
+        self.encoder.reset_episode()
+        self.est = None
+        self.last_u = 0.0
+
+    def observe_frame(self, frame: np.ndarray) -> None:
+        self.encoder.observe_frame(frame)
+
+    def _measure(self, frame: np.ndarray) -> tuple[float, float]:
+        self.encoder.observe_frame(frame)
+        context = self.encoder._context_from_buffer()
+        z = self.encoder.jepa.encode_context(context)
+        s_hat = predict_state_from_z(z.detach().cpu().reshape(-1).numpy().astype(np.float64), self.probe)
+        return float(s_hat[0]), float(s_hat[2])
+
+    @torch.no_grad()
+    def step(
+        self,
+        frame,
+        packet_received: bool,
+        plant_state: np.ndarray | None = None,
+    ) -> float:
+        del plant_state
+        if frame is None:
+            raise ValueError("ObserverLQRRuntimeController requires an RGB frame")
+        use_measurement = self.full_information or packet_received
+        if use_measurement:
+            x_m, th_m = self._measure(frame)
+        else:
+            self.encoder.observe_frame(frame)
+            x_m = th_m = None  # type: ignore[assignment]
+        if self.est is None:
+            if x_m is None:
+                return 0.0  # no embedding received yet (IC, matches FrozenRuntimeController)
+            self.est = np.array([x_m, 0.0, th_m, 0.0], dtype=np.float64)
+        else:
+            self.est = self.a @ self.est + self.b * float(self.last_u)
+            if x_m is not None:
+                rx = float(x_m) - float(self.est[0])
+                rth = float(th_m) - float(self.est[2])
+                self.est[0] += self.alpha * rx
+                self.est[1] += self.beta * rx / self.dt_obs
+                self.est[2] += self.alpha * rth
+                self.est[3] += self.beta * rth / self.dt_obs
+        u = lqr_force(self.gain, self.est, self.force_min, self.force_max)
+        self.last_u = u
+        return u
+
+
 class TrueStateLQRController:
     """Oracle LQR using plant_state (sanity check that the gain is stabilizing)."""
 
@@ -237,6 +331,145 @@ def collect_balanced_probe_pairs(
             u = float(np.clip(u + rng.normal(0.0, action_noise_std), force_min, force_max))
             state = _apply_held_force(env, u, stride)
     return np.stack(z_rows, axis=0), np.stack(s_rows, axis=0)
+
+
+def load_state_decoder_checkpoint(path: Path) -> dict[str, Any]:
+    """Load a probe-LQR decoder checkpoint (decoder.pt or probe_lqr.npz)."""
+    path = Path(path)
+    if path.suffix == ".npz":
+        with np.load(path) as payload:
+            probe = {
+                "kind": "linear",
+                "z_mean": np.asarray(payload["probe_z_mean"]),
+                "z_std": np.asarray(payload["probe_z_std"]),
+                "coefs": np.asarray(payload["probe_coefs"]),
+            }
+            return {
+                "probe": probe,
+                "gain": np.asarray(payload["lqr_gain"]),
+                "a": np.asarray(payload["A"]),
+                "b": np.asarray(payload["B"]).reshape(4),
+                "jepa_checkpoint": str(payload["jepa_checkpoint"]),
+            }
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    from ts_jepa.evaluation.mlp_state_decoder import StateDecoderMLP
+
+    z_mean = np.asarray(payload["probe_z_mean"])
+    model = StateDecoderMLP(
+        z_dim=int(z_mean.reshape(-1).shape[0]),
+        hidden=tuple(int(h) for h in payload["hidden"]),
+    )
+    model.load_state_dict(payload["mlp_state_dict"])
+    model.eval()
+    probe = {
+        "kind": "mlp",
+        "module": model,
+        "z_mean": z_mean,
+        "z_std": np.asarray(payload["probe_z_std"]),
+        "y_mean": np.asarray(payload["y_mean"]),
+        "y_std": np.asarray(payload["y_std"]),
+    }
+    return {
+        "probe": probe,
+        "gain": np.asarray(payload["lqr_gain"]),
+        "a": np.asarray(payload["A"]),
+        "b": np.asarray(payload["B"]).reshape(4),
+        "jepa_checkpoint": str(payload["jepa_checkpoint"]),
+    }
+
+
+def evaluate_observer_lqr(
+    config: dict[str, Any],
+    *,
+    decoder_checkpoint: Path,
+    jepa_checkpoint: Path | None = None,
+    actor_checkpoint: Path | None = None,
+    device: torch.device | None = None,
+    alpha: float = 0.5,
+    beta: float = 0.3,
+) -> dict[str, Any]:
+    """Closed-loop evaluation of ObserverLQRRuntimeController from a saved decoder."""
+    device = select_device(device)
+    project = project_root(config)
+    runs = project / config["paths"]["runs_root"]
+    loaded = load_state_decoder_checkpoint(Path(decoder_checkpoint))
+    jepa_ckpt = resolve_run_checkpoint(
+        runs,
+        jepa_run_dirname(config),
+        explicit=Path(jepa_checkpoint) if jepa_checkpoint else Path(loaded["jepa_checkpoint"]),
+        seed=0,
+    )
+    actor_ckpt = resolve_run_checkpoint(
+        runs,
+        actor_run_dirname(config),
+        explicit=Path(actor_checkpoint) if actor_checkpoint else None,
+    )
+    encoder = FrozenRuntimeController.from_checkpoints(config, jepa_ckpt, actor_ckpt, device=device)
+    for p in encoder.jepa.parameters():
+        p.requires_grad_(False)
+
+    gain, a, b = loaded["gain"], loaded["a"], loaded["b"]
+    seeds = [
+        int(s)
+        for s in config.get("evaluation", {}).get("working_gates", {}).get(
+            "closed_loop_seeds", [100, 101, 102]
+        )
+    ]
+    true_lqr = evaluate_true_state_lqr(config, gain, seeds=seeds)
+
+    def _make(full_information: bool) -> ObserverLQRRuntimeController:
+        return ObserverLQRRuntimeController(
+            encoder,
+            loaded["probe"],
+            gain,
+            a,
+            b,
+            alpha=alpha,
+            beta=beta,
+            full_information=full_information,
+        )
+
+    full_scores = [
+        float(evaluate_closed_loop(config, _make(True), seed=seed)["mean_control_score"])
+        for seed in seeds
+    ]
+    memoryless = ProbeLQRRuntimeController(encoder, loaded["probe"], gain, a, b, full_information=True)
+    memoryless_scores = [
+        float(evaluate_closed_loop(config, memoryless, seed=seed)["mean_control_score"])
+        for seed in seeds
+    ]
+    working = evaluate_closed_loop_working_gates(config, _make(False))
+
+    out_dir = runs / "semantic_actor_working_observer_lqr"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report = {
+        "method": "observer_lqr",
+        "jepa_updated": False,
+        "jepa_checkpoint": str(jepa_ckpt),
+        "decoder_checkpoint": str(Path(decoder_checkpoint).resolve()),
+        "decoder_kind": str(loaded["probe"].get("kind")),
+        "observer": {"alpha": float(alpha), "beta": float(beta)},
+        "lqr_gain": np.asarray(gain).reshape(-1).tolist(),
+        "true_state_lqr": true_lqr,
+        "observer_lqr_full_information": {
+            "seeds": seeds,
+            "mean_control_score": float(np.mean(full_scores)),
+            "per_seed": full_scores,
+        },
+        "memoryless_probe_lqr_full_information": {
+            "seeds": seeds,
+            "mean_control_score": float(np.mean(memoryless_scores)),
+            "per_seed": memoryless_scores,
+        },
+        "working_gate": working,
+        "note": (
+            "Velocities are NOT read from z (memoryless decode is MSE-attenuated, which "
+            "destroys the loop); they are re-estimated by an alpha-beta observer over the "
+            "decoded (x, theta). See runs/eval/velocity_observability_control.json."
+        ),
+    }
+    (out_dir / "metrics.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return report
 
 
 def train_probe_lqr_actor(
