@@ -19,6 +19,7 @@ def main() -> None:
     parser.add_argument("--actor-checkpoint", type=str, default=None)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--data-root", type=str, default=None)
+    parser.add_argument("--runs-root", type=str, default=None)
     parser.add_argument("--decoder", type=str, default="linear", choices=["linear", "mlp"])
     args = parser.parse_args()
     config = load_config(args.config)

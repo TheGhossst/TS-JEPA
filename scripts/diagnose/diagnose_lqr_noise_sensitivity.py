@@ -9,6 +9,7 @@ representation noise floor.
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -66,7 +67,13 @@ def rollout_score(
 
 
 def main() -> None:
-    config = load_config("configs/ts_jepa_working.yaml")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=str, default="configs/ts_jepa_working.yaml")
+    parser.add_argument("--seeds", type=int, nargs="+", default=[100, 101, 102])
+    parser.add_argument("--out", type=str, default="runs/eval/lqr_noise_sensitivity.json")
+    args = parser.parse_args()
+
+    config = load_config(args.config)
     env = build_inverted_cartpole_env(config)
     stride = _observation_stride(config)
     a, b = discrete_linearization(env.ode, stride)
@@ -80,7 +87,7 @@ def main() -> None:
             a, b, np.diag([4.0, 1.0, 20.0, 1.0]), np.array([[2.0]])
         ),
     }
-    seeds = [100, 101, 102]
+    seeds = [int(s) for s in args.seeds]
     noise_levels = [0.0, 1.0, 2.0, 3.0, 5.0]
     emas = [1.0, 0.5]
     reps = 3
@@ -106,7 +113,7 @@ def main() -> None:
                 }
                 print(f"{gname:28s} {key:20s} mean={np.mean(vals):.3f}")
 
-    out = Path("runs/eval/lqr_noise_sensitivity.json")
+    out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"wrote {out}")

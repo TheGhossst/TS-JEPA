@@ -95,6 +95,58 @@ def _periodic_receive_mask(steps: int, kp: int) -> list[bool]:
     return [((t % max(int(kp), 1)) == 0) for t in range(int(steps))]
 
 
+DEFAULT_OBSERVER_PACKET_RECEIVE_RATES: tuple[str, ...] = ("1.0", "0.8", "0.6", "0.4", "0.2", "1/15")
+
+
+def bernoulli_receive_mask(steps: int, rate: float, *, seed: int) -> list[bool]:
+    """I.i.d. packet-receive mask with success probability ``rate``."""
+    steps = int(steps)
+    rate = float(rate)
+    if steps <= 0:
+        return []
+    if rate >= 1.0:
+        return [True] * steps
+    if rate <= 0.0:
+        return [False] * steps
+    rng = np.random.default_rng(int(seed))
+    return [bool(x) for x in rng.random(steps) < rate]
+
+
+def parse_packet_receive_spec(spec: str | float, *, kp: int) -> dict[str, Any]:
+    """Map a CLI/config rate token to a mask kind.
+
+    ``1/15``, ``periodic``, or ``1/{Kp}`` → receive-every-Kp (working-gate mask).
+    A float such as ``0.8`` → Bernoulli receive probability.
+    """
+    kp = max(int(kp), 1)
+    if isinstance(spec, (int, float)) and not isinstance(spec, bool):
+        token = str(spec)
+        rate = float(spec)
+        return {"kind": "bernoulli", "receive_rate": rate, "spec": token}
+    token = str(spec).strip().lower()
+    if token in {"periodic", "periodic_kp", "kp", "1/15"} or token == f"1/{kp}":
+        return {
+            "kind": "periodic_kp",
+            "receive_rate": 1.0 / float(kp),
+            "kp": kp,
+            "spec": token,
+        }
+    return {"kind": "bernoulli", "receive_rate": float(token), "spec": token}
+
+
+def make_receive_mask(steps: int, spec: dict[str, Any], *, seed: int) -> list[bool]:
+    if str(spec.get("kind")) == "periodic_kp":
+        return _periodic_receive_mask(steps, int(spec.get("kp") or 1))
+    return bernoulli_receive_mask(steps, float(spec["receive_rate"]), seed=int(seed))
+
+
+def closed_loop_eval_seeds(config: dict[str, Any], override: list[int] | None = None) -> list[int]:
+    if override is not None:
+        return [int(s) for s in override]
+    gates = config.get("evaluation", {}).get("working_gates", {})
+    return [int(s) for s in gates.get("closed_loop_seeds", [100, 101, 102])]
+
+
 def evaluate_jepa_working_gates(
     config: dict[str, Any],
     *,
@@ -200,13 +252,86 @@ def evaluate_actor_working_gates(
     return out
 
 
+def evaluate_closed_loop_packet_loss_sweep(
+    config: dict[str, Any],
+    controller: FrozenRuntimeController,
+    *,
+    seeds: list[int] | None = None,
+    rate_specs: list[str] | list[float] | None = None,
+) -> dict[str, Any]:
+    """Observer (or any miss-aware) controller vs hold-last / zero-action.
+
+    Rates ``1.0…0.2`` are i.i.d. Bernoulli receive probabilities. ``1/15`` is
+    the receive-every-Kp mask used by the working gate (Kp from config).
+    """
+    seeds = closed_loop_eval_seeds(config, seeds)
+    steps = int(config["simulation"]["trajectory_steps"])
+    kp = int(config["ts_jepa"]["prediction_horizon"]["Kp"])
+    parsed = [
+        parse_packet_receive_spec(spec, kp=kp)
+        for spec in (rate_specs if rate_specs is not None else DEFAULT_OBSERVER_PACKET_RECEIVE_RATES)
+    ]
+    rates_out: list[dict[str, Any]] = []
+    for spec in parsed:
+        predict_scores: list[float] = []
+        hold_scores: list[float] = []
+        zero_scores: list[float] = []
+        realized: list[float] = []
+        for seed in seeds:
+            mask_seed = int(seed) * 1_000_003 + int(round(float(spec["receive_rate"]) * 10_000))
+            mask = make_receive_mask(steps, spec, seed=mask_seed)
+            realized.append(float(np.mean(mask)) if mask else 0.0)
+            predict_scores.append(
+                float(
+                    evaluate_closed_loop(
+                        config, controller, steps=steps, seed=seed, packet_receive_mask=mask
+                    )["mean_control_score"]
+                )
+            )
+            hold = _HoldOnMiss(controller)
+            hold_scores.append(
+                float(
+                    evaluate_closed_loop(
+                        config, hold, steps=steps, seed=seed, packet_receive_mask=mask
+                    )["mean_control_score"]
+                )
+            )
+            zero = _ZeroOnMiss(controller)
+            zero_scores.append(
+                float(
+                    evaluate_closed_loop(
+                        config, zero, steps=steps, seed=seed, packet_receive_mask=mask
+                    )["mean_control_score"]
+                )
+            )
+        entry: dict[str, Any] = {
+            "spec": spec["spec"],
+            "mask": spec["kind"],
+            "target_receive_rate": float(spec["receive_rate"]),
+            "mean_realized_receive_rate": float(np.mean(realized)),
+            "seeds": seeds,
+            "predict_only_mean_control_score": float(np.mean(predict_scores)),
+            "predict_only_per_seed": predict_scores,
+            "hold_last_mean_control_score": float(np.mean(hold_scores)),
+            "hold_last_per_seed": hold_scores,
+            "zero_action_mean_control_score": float(np.mean(zero_scores)),
+            "zero_action_per_seed": zero_scores,
+        }
+        if spec["kind"] == "periodic_kp":
+            entry["kp"] = int(spec["kp"])
+        rates_out.append(entry)
+    return {"seeds": seeds, "kp": kp, "rates": rates_out}
+
+
 def evaluate_closed_loop_working_gates(
     config: dict[str, Any],
     controller: FrozenRuntimeController,
+    *,
+    seeds: list[int] | None = None,
 ) -> dict[str, Any]:
     gates = config.get("evaluation", {}).get("working_gates", {})
     require = bool(gates.get("closed_loop_must_beat_hold_and_zero", True))
-    seeds = [int(s) for s in gates.get("closed_loop_seeds", [100, 101, 102])]
+    seeds = closed_loop_eval_seeds(config, seeds)
     steps = int(config["simulation"]["trajectory_steps"])
     kp = int(config["ts_jepa"]["prediction_horizon"]["Kp"])
     mask = _periodic_receive_mask(steps, kp)

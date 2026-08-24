@@ -14,6 +14,7 @@ Modes:
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -103,12 +104,18 @@ def rollout(config, gain, *, seed, mode, vel_atten, vel_noise, rng):
 
 
 def main() -> None:
-    config = load_config("configs/ts_jepa_working.yaml")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=str, default="configs/ts_jepa_working.yaml")
+    parser.add_argument("--seeds", type=int, nargs="+", default=[100, 101, 102])
+    parser.add_argument("--out", type=str, default="runs/eval/velocity_observability_control.json")
+    args = parser.parse_args()
+
+    config = load_config(args.config)
     env = build_inverted_cartpole_env(config)
     stride = _observation_stride(config)
     a, b = discrete_linearization(env.ode, stride)
     gain = discrete_lqr_gain(a, b, *default_lqr_weights())
-    seeds = [100, 101, 102]
+    seeds = [int(s) for s in args.seeds]
     reps = 3
 
     cases = [
@@ -141,7 +148,8 @@ def main() -> None:
         report[name] = {"mean": float(np.mean(vals)), "per_rollout": [round(v, 3) for v in vals]}
         print(f"{name:30s} mean={np.mean(vals):.3f} per={[round(v,2) for v in vals]}")
 
-    out = Path("runs/eval/velocity_observability_control.json")
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"wrote {out}")
 

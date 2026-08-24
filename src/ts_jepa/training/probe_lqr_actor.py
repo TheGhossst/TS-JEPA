@@ -38,7 +38,11 @@ from ts_jepa.evaluation.evaluate import (
     evaluate_closed_loop,
 )
 from ts_jepa.evaluation.metrics import control_score
-from ts_jepa.evaluation.working_gates import evaluate_closed_loop_working_gates
+from ts_jepa.evaluation.working_gates import (
+    closed_loop_eval_seeds,
+    evaluate_closed_loop_packet_loss_sweep,
+    evaluate_closed_loop_working_gates,
+)
 from ts_jepa.inference.infer import FrozenRuntimeController
 
 
@@ -73,6 +77,84 @@ def predict_state_from_z(z: np.ndarray, probe: dict[str, Any]) -> np.ndarray:
         axis=1,
     )
     return pred.reshape(4) if single else pred
+
+
+def decode_cartpole_positions(
+    encoder: FrozenRuntimeController,
+    probe: dict[str, Any],
+    frame: np.ndarray,
+) -> tuple[float, float]:
+    encoder.observe_frame(frame)
+    context = encoder._context_from_buffer()
+    z = encoder.jepa.encode_context(context)
+    s_hat = predict_state_from_z(z.detach().cpu().reshape(-1).numpy().astype(np.float64), probe)
+    return float(s_hat[0]), float(s_hat[2])
+
+
+def alpha_beta_correct(
+    est: np.ndarray,
+    x_m: float,
+    th_m: float,
+    *,
+    alpha: float,
+    beta: float,
+    dt_obs: float,
+) -> np.ndarray:
+    out = np.asarray(est, dtype=np.float64).reshape(4).copy()
+    rx = float(x_m) - float(out[0])
+    rth = float(th_m) - float(out[2])
+    out[0] += float(alpha) * rx
+    out[1] += float(beta) * rx / float(dt_obs)
+    out[2] += float(alpha) * rth
+    out[3] += float(beta) * rth / float(dt_obs)
+    return out
+
+
+def finite_difference_state(
+    x_m: float,
+    th_m: float,
+    last_x: float,
+    last_th: float,
+    n_steps: int,
+    dt_obs: float,
+) -> np.ndarray:
+    n = max(int(n_steps), 1)
+    dt = float(dt_obs) * n
+    return np.array(
+        [
+            float(x_m),
+            (float(x_m) - float(last_x)) / dt,
+            float(th_m),
+            (float(th_m) - float(last_th)) / dt,
+        ],
+        dtype=np.float64,
+    )
+
+
+def _dt_obs_from_encoder(encoder: FrozenRuntimeController) -> float:
+    stride = max(1, int(encoder.config["simulation"].get("observation_stride_steps", 1)))
+    return float(stride) * float(encoder.config["simulation"]["dt"])
+
+
+def _dt_obs_from_config(config: dict[str, Any]) -> float:
+    stride = max(1, int(config["simulation"].get("observation_stride_steps", 1)))
+    return float(stride) * float(config["simulation"]["dt"])
+
+
+def _closed_loop_seed_block(
+    config: dict[str, Any],
+    controller: Any,
+    seeds: list[int],
+) -> dict[str, Any]:
+    scores = [
+        float(evaluate_closed_loop(config, controller, seed=int(seed))["mean_control_score"])
+        for seed in seeds
+    ]
+    return {
+        "seeds": [int(s) for s in seeds],
+        "mean_control_score": float(np.mean(scores)),
+        "per_seed": scores,
+    }
 
 
 class ProbeLQRRuntimeController:
@@ -183,8 +265,7 @@ class ObserverLQRRuntimeController:
         self.full_information = bool(full_information)
         self.force_min = encoder.stats.force_min
         self.force_max = encoder.stats.force_max
-        stride = max(1, int(encoder.config["simulation"].get("observation_stride_steps", 1)))
-        self.dt_obs = float(stride) * float(encoder.config["simulation"]["dt"])
+        self.dt_obs = _dt_obs_from_encoder(encoder)
         self.est: np.ndarray | None = None
         self.last_u = 0.0
 
@@ -197,11 +278,7 @@ class ObserverLQRRuntimeController:
         self.encoder.observe_frame(frame)
 
     def _measure(self, frame: np.ndarray) -> tuple[float, float]:
-        self.encoder.observe_frame(frame)
-        context = self.encoder._context_from_buffer()
-        z = self.encoder.jepa.encode_context(context)
-        s_hat = predict_state_from_z(z.detach().cpu().reshape(-1).numpy().astype(np.float64), self.probe)
-        return float(s_hat[0]), float(s_hat[2])
+        return decode_cartpole_positions(self.encoder, self.probe, frame)
 
     @torch.no_grad()
     def step(
@@ -226,12 +303,160 @@ class ObserverLQRRuntimeController:
         else:
             self.est = self.a @ self.est + self.b * float(self.last_u)
             if x_m is not None:
-                rx = float(x_m) - float(self.est[0])
-                rth = float(th_m) - float(self.est[2])
-                self.est[0] += self.alpha * rx
-                self.est[1] += self.beta * rx / self.dt_obs
-                self.est[2] += self.alpha * rth
-                self.est[3] += self.beta * rth / self.dt_obs
+                self.est = alpha_beta_correct(
+                    self.est, x_m, th_m, alpha=self.alpha, beta=self.beta, dt_obs=self.dt_obs
+                )
+        u = lqr_force(self.gain, self.est, self.force_min, self.force_max)
+        self.last_u = u
+        return u
+
+
+class TruePositionObserverLQRController:
+    """Oracle (x, θ) + α-β observer + discrete LQR.
+
+    Packet received gates whether the plant positions are applied as
+    measurements; on a miss the discrete linearization predicts only.
+    """
+
+    miss_behavior = "observer_predict_no_correction_true_position"
+
+    def __init__(
+        self,
+        config: dict[str, Any],
+        gain: np.ndarray,
+        a: np.ndarray,
+        b: np.ndarray,
+        *,
+        alpha: float = 0.5,
+        beta: float = 0.3,
+        full_information: bool = False,
+    ) -> None:
+        self.gain = np.asarray(gain, dtype=np.float64).reshape(1, 4)
+        self.a = np.asarray(a, dtype=np.float64).reshape(4, 4)
+        self.b = np.asarray(b, dtype=np.float64).reshape(4)
+        self.alpha = float(alpha)
+        self.beta = float(beta)
+        self.full_information = bool(full_information)
+        self.force_min = float(config["simulation"]["control_min_N"])
+        self.force_max = float(config["simulation"]["control_max_N"])
+        self.dt_obs = _dt_obs_from_config(config)
+        self.est: np.ndarray | None = None
+        self.last_u = 0.0
+
+    def reset_episode(self) -> None:
+        self.est = None
+        self.last_u = 0.0
+
+    def observe_frame(self, frame: np.ndarray) -> None:
+        del frame
+
+    def step(self, frame, packet_received: bool, plant_state: np.ndarray | None = None) -> float:
+        del frame
+        if plant_state is None:
+            raise ValueError("TruePositionObserverLQRController requires plant_state")
+        use_measurement = self.full_information or packet_received
+        x_m = th_m = None
+        if use_measurement:
+            x_m = float(np.asarray(plant_state, dtype=np.float64).reshape(-1)[0])
+            th_m = float(np.asarray(plant_state, dtype=np.float64).reshape(-1)[2])
+        if self.est is None:
+            if x_m is None:
+                return 0.0
+            self.est = np.array([x_m, 0.0, th_m, 0.0], dtype=np.float64)
+        else:
+            self.est = self.a @ self.est + self.b * float(self.last_u)
+            if x_m is not None:
+                self.est = alpha_beta_correct(
+                    self.est, x_m, th_m, alpha=self.alpha, beta=self.beta, dt_obs=self.dt_obs
+                )
+        u = lqr_force(self.gain, self.est, self.force_min, self.force_max)
+        self.last_u = u
+        return u
+
+
+class FiniteDifferenceLQRRuntimeController:
+    """RGB → frozen Ψθ → decoded (x, θ) → finite-difference velocities → LQR.
+
+    On a miss the discrete linearization predicts; the next received decode
+    differences against the last measurement over the elapsed observation steps.
+    """
+
+    miss_behavior = "fd_predict_no_measurement"
+
+    def __init__(
+        self,
+        encoder: FrozenRuntimeController,
+        probe: dict[str, Any],
+        gain: np.ndarray,
+        a: np.ndarray,
+        b: np.ndarray,
+        *,
+        full_information: bool = False,
+    ) -> None:
+        self.encoder = encoder
+        self.probe = probe
+        self.gain = np.asarray(gain, dtype=np.float64).reshape(1, 4)
+        self.a = np.asarray(a, dtype=np.float64).reshape(4, 4)
+        self.b = np.asarray(b, dtype=np.float64).reshape(4)
+        self.full_information = bool(full_information)
+        self.force_min = encoder.stats.force_min
+        self.force_max = encoder.stats.force_max
+        self.dt_obs = _dt_obs_from_encoder(encoder)
+        self.est: np.ndarray | None = None
+        self.last_u = 0.0
+        self._last_meas: tuple[float, float] | None = None
+        self._steps_since_meas = 0
+
+    def reset_episode(self) -> None:
+        self.encoder.reset_episode()
+        self.est = None
+        self.last_u = 0.0
+        self._last_meas = None
+        self._steps_since_meas = 0
+
+    def observe_frame(self, frame: np.ndarray) -> None:
+        self.encoder.observe_frame(frame)
+
+    def _measure(self, frame: np.ndarray) -> tuple[float, float]:
+        return decode_cartpole_positions(self.encoder, self.probe, frame)
+
+    @torch.no_grad()
+    def step(
+        self,
+        frame,
+        packet_received: bool,
+        plant_state: np.ndarray | None = None,
+    ) -> float:
+        del plant_state
+        if frame is None:
+            raise ValueError("FiniteDifferenceLQRRuntimeController requires an RGB frame")
+        use_measurement = self.full_information or packet_received
+        if use_measurement:
+            x_m, th_m = self._measure(frame)
+        else:
+            self.encoder.observe_frame(frame)
+            x_m = th_m = None  # type: ignore[assignment]
+        if self.est is None:
+            if x_m is None:
+                return 0.0
+            self.est = np.array([x_m, 0.0, th_m, 0.0], dtype=np.float64)
+            self._last_meas = (float(x_m), float(th_m))
+            self._steps_since_meas = 0
+        elif x_m is not None:
+            assert self._last_meas is not None
+            self.est = finite_difference_state(
+                x_m,
+                th_m,
+                self._last_meas[0],
+                self._last_meas[1],
+                self._steps_since_meas + 1,
+                self.dt_obs,
+            )
+            self._last_meas = (float(x_m), float(th_m))
+            self._steps_since_meas = 0
+        else:
+            self.est = self.a @ self.est + self.b * float(self.last_u)
+            self._steps_since_meas += 1
         u = lqr_force(self.gain, self.est, self.force_min, self.force_max)
         self.last_u = u
         return u
@@ -250,6 +475,9 @@ class TrueStateLQRController:
 
     def reset_episode(self) -> None:
         return None
+
+    def observe_frame(self, frame: np.ndarray) -> None:
+        del frame
 
     def step(self, frame, packet_received: bool, plant_state: np.ndarray | None = None) -> float:
         del frame, packet_received
@@ -387,6 +615,12 @@ def evaluate_observer_lqr(
     device: torch.device | None = None,
     alpha: float = 0.5,
     beta: float = 0.3,
+    seeds: list[int] | None = None,
+    out_dir: Path | None = None,
+    packet_receive_rates: list[str] | list[float] | None = None,
+    include_ablations: bool = True,
+    include_working_gate: bool = True,
+    include_packet_loss_sweep: bool = False,
 ) -> dict[str, Any]:
     """Closed-loop evaluation of ObserverLQRRuntimeController from a saved decoder."""
     device = select_device(device)
@@ -409,15 +643,10 @@ def evaluate_observer_lqr(
         p.requires_grad_(False)
 
     gain, a, b = loaded["gain"], loaded["a"], loaded["b"]
-    seeds = [
-        int(s)
-        for s in config.get("evaluation", {}).get("working_gates", {}).get(
-            "closed_loop_seeds", [100, 101, 102]
-        )
-    ]
+    seeds = closed_loop_eval_seeds(config, seeds)
     true_lqr = evaluate_true_state_lqr(config, gain, seeds=seeds)
 
-    def _make(full_information: bool) -> ObserverLQRRuntimeController:
+    def _make_observer(full_information: bool) -> ObserverLQRRuntimeController:
         return ObserverLQRRuntimeController(
             encoder,
             loaded["probe"],
@@ -429,20 +658,7 @@ def evaluate_observer_lqr(
             full_information=full_information,
         )
 
-    full_scores = [
-        float(evaluate_closed_loop(config, _make(True), seed=seed)["mean_control_score"])
-        for seed in seeds
-    ]
-    memoryless = ProbeLQRRuntimeController(encoder, loaded["probe"], gain, a, b, full_information=True)
-    memoryless_scores = [
-        float(evaluate_closed_loop(config, memoryless, seed=seed)["mean_control_score"])
-        for seed in seeds
-    ]
-    working = evaluate_closed_loop_working_gates(config, _make(False))
-
-    out_dir = runs / "semantic_actor_working_observer_lqr"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    report = {
+    report: dict[str, Any] = {
         "method": "observer_lqr",
         "jepa_updated": False,
         "jepa_checkpoint": str(jepa_ckpt),
@@ -451,24 +667,49 @@ def evaluate_observer_lqr(
         "observer": {"alpha": float(alpha), "beta": float(beta)},
         "lqr_gain": np.asarray(gain).reshape(-1).tolist(),
         "true_state_lqr": true_lqr,
-        "observer_lqr_full_information": {
-            "seeds": seeds,
-            "mean_control_score": float(np.mean(full_scores)),
-            "per_seed": full_scores,
-        },
-        "memoryless_probe_lqr_full_information": {
-            "seeds": seeds,
-            "mean_control_score": float(np.mean(memoryless_scores)),
-            "per_seed": memoryless_scores,
-        },
-        "working_gate": working,
+        "observer_lqr_full_information": _closed_loop_seed_block(config, _make_observer(True), seeds),
+        "memoryless_probe_lqr_full_information": _closed_loop_seed_block(
+            config,
+            ProbeLQRRuntimeController(encoder, loaded["probe"], gain, a, b, full_information=True),
+            seeds,
+        ),
         "note": (
             "Velocities are NOT read from z (memoryless decode is MSE-attenuated, which "
             "destroys the loop); they are re-estimated by an alpha-beta observer over the "
             "decoded (x, theta). See runs/eval/velocity_observability_control.json."
         ),
     }
-    (out_dir / "metrics.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if include_ablations:
+        report["true_position_observer_lqr_full_information"] = _closed_loop_seed_block(
+            config,
+            TruePositionObserverLQRController(
+                config, gain, a, b, alpha=alpha, beta=beta, full_information=True
+            ),
+            seeds,
+        )
+        report["frozen_z_fd_lqr_full_information"] = _closed_loop_seed_block(
+            config,
+            FiniteDifferenceLQRRuntimeController(
+                encoder, loaded["probe"], gain, a, b, full_information=True
+            ),
+            seeds,
+        )
+    if include_working_gate:
+        report["working_gate"] = evaluate_closed_loop_working_gates(
+            config, _make_observer(False), seeds=seeds
+        )
+    if include_packet_loss_sweep or packet_receive_rates is not None:
+        report["packet_loss_sweep"] = evaluate_closed_loop_packet_loss_sweep(
+            config,
+            _make_observer(False),
+            seeds=seeds,
+            rate_specs=packet_receive_rates,
+        )
+
+    dest = Path(out_dir) if out_dir is not None else runs / "semantic_actor_working_observer_lqr"
+    dest.mkdir(parents=True, exist_ok=True)
+    report["out_dir"] = str(dest.resolve())
+    (dest / "metrics.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return report
 
 
