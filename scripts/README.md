@@ -137,11 +137,14 @@ python scripts/pipeline/train_actor.py --config configs/ts_jepa_dp_fixed.yaml --
 python scripts/pipeline/eval_runtime.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --mode baseline --jepa-checkpoint runs/ts_jepa_dp_fixed/best.pt --actor-checkpoint runs/semantic_actor_dp_fixed/best.pt --out-dir runs/eval
 ```
 
-### Partial / resume pipeline
+Resume / partial pipeline
 
 ```powershell
 # Skip data generation (data already on disk)
 python scripts/pipeline/run_full_baseline.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --skip-generate
+
+# Resume interrupted JEPA seeds from each seed's last.pt
+python scripts/pipeline/run_full_baseline.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --skip-generate --resume
 
 # JEPA already done — actor + eval only
 python scripts/pipeline/run_full_baseline.py --config configs/ts_jepa_dp_fixed.yaml --device cuda --skip-generate --skip-jepa

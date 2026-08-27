@@ -79,6 +79,11 @@ def main() -> None:
     parser.add_argument("--include-wireless", action="store_true", help="Run wireless eval only after baseline validation passes.")
     parser.add_argument("--jepa-epochs", type=int, default=None)
     parser.add_argument("--actor-epochs", type=int, default=None)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume interrupted JEPA seeds from each seed's last.pt (requires incomplete seeds).",
+    )
     args = parser.parse_args()
 
     # Prefer all CPU cores for the long paper-scale run.
@@ -123,6 +128,7 @@ def main() -> None:
             device=device,
             max_epochs=args.jepa_epochs,
             data_root=data_root,
+            resume=args.resume,
         )
         print(json.dumps(jepa_summary, indent=2))
         print(f"JEPA training done in {time.time() - t0:.1f}s")

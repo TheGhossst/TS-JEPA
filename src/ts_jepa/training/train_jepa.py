@@ -198,6 +198,30 @@ def seed_training_complete(run_dir: Path, expected_epochs: int) -> bool:
     return reached >= int(expected_epochs)
 
 
+def resolve_seed_resume_checkpoint(run_dir: Path) -> Path | None:
+    """Return ``run_dir/last.pt`` when it contains a resumable training checkpoint."""
+    last_path = run_dir / "last.pt"
+    if not last_path.is_file():
+        return None
+    checkpoint = load_checkpoint(last_path)
+    if "optimizer" not in checkpoint:
+        return None
+    required = (
+        "model",
+        "epoch",
+        "best_val",
+        "best_epoch",
+        "stale",
+        "history",
+        "config",
+        "normalizer",
+        "seed",
+    )
+    if any(key not in checkpoint for key in required):
+        return None
+    return last_path
+
+
 _seed_training_complete = seed_training_complete
 
 
@@ -875,12 +899,17 @@ def train_ts_jepa_repetitions(
     device: torch.device | None = None,
     max_epochs: int | None = None,
     data_root: Path | None = None,
+    *,
+    resume: bool = False,
 ) -> dict[str, Any]:
     """
     Paper protocol: repeat the experiment, save each seed, report the best validation run.
 
     Seeds that already finished the requested epoch budget (final ``last.pt``
     with ``test_loss`` and history/epoch covering ``expected_epochs``) are skipped.
+
+    When ``resume`` is True, incomplete seeds with a resumable ``last.pt`` continue
+    from the saved optimizer state instead of restarting from epoch 1.
     """
     reps = int(config["evaluation"]["repetitions"])
     seeds = list(config["evaluation"].get("seeds", list(range(reps))))[:reps]
@@ -892,8 +921,23 @@ def train_ts_jepa_repetitions(
     for seed in seeds:
         seed_dir = root_runs / f"seed_{seed}"
         if seed_training_complete(seed_dir, expected_epochs):
+            print(f"JEPA seed {seed}: already complete ({expected_epochs} epochs), skipping", flush=True)
             seed_results.append(_load_completed_seed_result(seed_dir))
             continue
+        resume_from = resolve_seed_resume_checkpoint(seed_dir) if resume else None
+        if resume_from is not None:
+            ckpt = load_checkpoint(resume_from)
+            print(
+                f"JEPA seed {seed}: resuming from {resume_from} at epoch {ckpt['epoch']}",
+                flush=True,
+            )
+        elif resume and (seed_dir / "last.pt").is_file():
+            print(
+                f"JEPA seed {seed}: last.pt is not resumable; starting from scratch",
+                flush=True,
+            )
+        else:
+            print(f"JEPA seed {seed}: training from scratch", flush=True)
         result = train_ts_jepa(
             config,
             device=device,
@@ -901,6 +945,7 @@ def train_ts_jepa_repetitions(
             data_root=data_root,
             seed=int(seed),
             run_dir=seed_dir,
+            resume_from=resume_from,
         )
         seed_results.append(result)
 

@@ -73,7 +73,7 @@ def main() -> None:
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Resume from the default last.pt for --single-seed in the current run directory.",
+        help="Resume from last.pt: with --single-seed, that seed only; otherwise each incomplete JEPA seed in the 5-seed protocol.",
     )
     parser.add_argument(
         "--microbatch-size",
@@ -129,8 +129,13 @@ def main() -> None:
         )
     else:
         if resume_path is not None:
-            raise SystemExit("--resume / --resume-from requires --single-seed")
-        result = train_ts_jepa_repetitions(config, device=device, max_epochs=args.epochs)
+            raise SystemExit("--resume-from requires --single-seed")
+        result = train_ts_jepa_repetitions(
+            config,
+            device=device,
+            max_epochs=args.epochs,
+            resume=args.resume,
+        )
     print(json.dumps(result, indent=2, default=str))
 
 

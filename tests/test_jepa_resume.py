@@ -15,6 +15,7 @@ from ts_jepa.runtime import load_checkpoint, save_checkpoint
 from ts_jepa.training.jepa_optimizer import jepa_scheduled_lr
 from ts_jepa.training.train_jepa import (
     train_ts_jepa,
+    train_ts_jepa_repetitions,
     validate_checkpoint_config_compatibility,
 )
 
@@ -331,3 +332,51 @@ def test_seed_training_complete_requires_epoch_budget(tmp_path: Path):
     torch.save({"test_loss": -0.98, "epoch": 2, "history": [{"epoch": 1}, {"epoch": 2}]}, run_dir / "last.pt")
     assert seed_training_complete(run_dir, expected_epochs=2) is True
     assert seed_training_complete(run_dir, expected_epochs=150) is False
+
+
+def test_repetitions_resume_continues_incomplete_seed(tmp_path: Path):
+    config = _tiny_config(tmp_path)
+    config["evaluation"]["repetitions"] = 2
+    config["evaluation"]["seeds"] = [0, 1]
+    root = _generate(config)
+    runs = Path(config["paths"]["runs_root"]) / "ts_jepa"
+
+    train_ts_jepa(
+        config, device=torch.device("cpu"), max_epochs=1, data_root=root, seed=0, run_dir=runs / "seed_0"
+    )
+    first = load_checkpoint(runs / "seed_0" / "last.pt")
+    assert first["epoch"] == 1
+
+    train_ts_jepa_repetitions(
+        config,
+        device=torch.device("cpu"),
+        max_epochs=2,
+        data_root=root,
+        resume=True,
+    )
+    resumed = load_checkpoint(runs / "seed_0" / "last.pt")
+    assert resumed["epoch"] == 2
+    assert len(resumed["history"]) == 2
+    assert (runs / "seed_1" / "last.pt").is_file()
+
+
+def test_repetitions_without_resume_restarts_incomplete_seed(tmp_path: Path):
+    config = _tiny_config(tmp_path)
+    config["evaluation"]["repetitions"] = 1
+    config["evaluation"]["seeds"] = [0]
+    root = _generate(config)
+    runs = Path(config["paths"]["runs_root"]) / "ts_jepa" / "seed_0"
+
+    train_ts_jepa(config, device=torch.device("cpu"), max_epochs=1, data_root=root, seed=0, run_dir=runs)
+    first_history_len = len(load_checkpoint(runs / "last.pt")["history"])
+
+    train_ts_jepa_repetitions(
+        config,
+        device=torch.device("cpu"),
+        max_epochs=1,
+        data_root=root,
+        resume=False,
+    )
+    restarted = load_checkpoint(runs / "last.pt")
+    assert restarted["epoch"] == 1
+    assert len(restarted["history"]) == first_history_len
