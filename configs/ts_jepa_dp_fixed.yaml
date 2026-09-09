@@ -48,4 +48,11 @@ semantic_actor:
     mix_offline: false
     mix_mode: convex
     checkpoint_selection: last
+    round_selection: best_closed_loop
     run_dirname: semantic_actor_dp_fixed_dagger
+
+# 100 stored decisions × 1 ms = 100 ms, which cannot enter |x|,|θ|≤0.05 from
+# init_noise=0.35 (even oracle LQR scores ~0). Hold each command 20 ms so a
+# 100-step Eq. (28) rollout is 2 s — same wall-clock as the working overlay.
+evaluation:
+  control_hold_steps: 20

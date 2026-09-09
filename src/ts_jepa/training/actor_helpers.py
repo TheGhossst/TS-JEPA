@@ -102,7 +102,9 @@ def actor_train_recipe_id(config: Mapping[str, Any]) -> str:
             str(arch.get("dropout", 0.2)),
             str(opt.get("learning_rate", "")),
             str(bool(dagger.get("enabled", False))),
-            "v2",
+            str((config.get("evaluation") or {}).get("control_hold_steps", "")),
+            str(dagger.get("round_selection", "last")),
+            "v3",
         ]
     )
 

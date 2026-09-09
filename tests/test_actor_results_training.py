@@ -73,3 +73,14 @@ def test_dp_fixed_recipe_id_differs_from_baseline():
     results = load_config("configs/ts_jepa_dp_fixed.yaml")
     assert plan_enforced(results) is False
     assert actor_train_recipe_id(paper) != actor_train_recipe_id(results)
+
+
+def test_dp_fixed_control_hold_is_20ms_not_dataset_stride():
+    from ts_jepa.evaluation.evaluate import _observation_stride, control_loop_stride
+
+    paper = load_config()
+    results = load_config("configs/ts_jepa_dp_fixed.yaml")
+    assert _observation_stride(paper) == 1
+    assert control_loop_stride(paper) == 1
+    assert _observation_stride(results) == 1
+    assert control_loop_stride(results) == 20

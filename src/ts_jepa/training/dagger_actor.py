@@ -23,7 +23,7 @@ from ts_jepa.device import select_device
 from ts_jepa.evaluation.checkpoints import resolve_run_checkpoint
 from ts_jepa.evaluation.evaluate import (
     _apply_held_force,
-    _observation_stride,
+    control_loop_stride,
     evaluate_closed_loop,
 )
 from ts_jepa.evaluation.raw_state_actor import ActorFeatureDataset, train_feature_actor
@@ -56,6 +56,7 @@ DEFAULT_DAGGER = {
     "init_from_bc": True,
     "mix_mode": "convex",
     "checkpoint_selection": "last",
+    "round_selection": "last",
     "expert": "lqr",
     "feature": "z",
     "run_dirname": "semantic_actor_working_dagger",
@@ -193,7 +194,7 @@ def collect_dagger_round(
 ) -> dict[str, Any]:
     """Roll out mixed actor/teacher; label every visited z with teacher.act(state)."""
     steps = int(config["simulation"]["trajectory_steps"])
-    stride = _observation_stride(config)
+    stride = control_loop_stride(config)
     kp = int(config["ts_jepa"]["prediction_horizon"]["Kp"])
     emb_dim = int(config["ts_jepa"]["encoder"]["embedding_dim"])
     lossy_mask = _periodic_receive_mask(steps, kp)
@@ -426,6 +427,10 @@ def train_actor_dagger(
     )
     if not bool(settings["init_from_bc"]):
         actor_state = None
+    round_sel = str(settings.get("round_selection", "last"))
+    best_loop_score = float("-inf")
+    best_round_state = None
+    best_round_i: int | None = None
 
     def _loop_controller():
         if feature_kind == "z":
@@ -507,6 +512,24 @@ def train_actor_dagger(
                 f"{loop['full_information']['mean_control_score']:.4f}",
                 flush=True,
             )
+            if round_sel == "best_closed_loop":
+                score = float(loop["full_information"]["mean_control_score"])
+                if score > best_loop_score:
+                    best_loop_score = score
+                    best_round_state = actor_state
+                    best_round_i = round_i
+
+    if round_sel == "best_closed_loop" and best_round_state is not None:
+        actor_state = best_round_state
+        policy_actor.load_state_dict(actor_state)
+        policy_actor.eval()
+        if feature_kind == "z":
+            controller.actor.load_state_dict(actor_state)
+            controller.actor.eval()
+        print(
+            f"dagger: selected round={best_round_i} closed_loop={best_loop_score:.4f}",
+            flush=True,
+        )
 
     save_checkpoint(
         out_dir / "best.pt",
@@ -521,6 +544,8 @@ def train_actor_dagger(
             "embedding_dim": feature_dim(z_dim, feature_kind),  # type: ignore[arg-type]
             "rounds": round_logs,
             "init_actor_checkpoint": str(Path(actor_ckpt).resolve()),
+            "round_selection": round_sel,
+            "selected_round": best_round_i,
         },
     )
     report = {
@@ -530,6 +555,8 @@ def train_actor_dagger(
         "settings": settings,
         "rounds": round_logs,
         "jepa_updated": False,
+        "round_selection": round_sel,
+        "selected_round": best_round_i,
     }
     if not skip_eval:
         loop_ctrl = _loop_controller()

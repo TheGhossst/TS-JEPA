@@ -8,7 +8,7 @@ import pytest
 from ts_jepa.config import load_config
 from ts_jepa.control.lqr import discrete_linearization, discrete_lqr_gain, default_lqr_weights, lqr_force, lqr_forces, lqr_gain_from_config
 from ts_jepa.env.factory import build_inverted_cartpole_env
-from ts_jepa.evaluation.evaluate import _observation_stride
+from ts_jepa.evaluation.evaluate import _observation_stride, control_loop_stride
 from ts_jepa.training.probe_lqr_actor import evaluate_true_state_lqr, fit_z_state_probe, predict_state_from_z
 
 
@@ -21,6 +21,18 @@ def test_true_state_lqr_beats_zero_on_working_seeds():
     for final in out["final_states"]:
         assert abs(final[0]) < 0.05
         assert abs(final[2]) < 0.05
+
+
+def test_true_state_lqr_beats_zero_on_dp_fixed_with_control_hold():
+    """Oracle LQR on paper inits only scores if each decision is held ~20 ms (2 s episode)."""
+    config = load_config("configs/ts_jepa_dp_fixed.yaml")
+    assert control_loop_stride(config) == 20
+    gain = lqr_gain_from_config(config)
+    out = evaluate_true_state_lqr(config, gain, seeds=[100, 101, 102])
+    assert out["mean_control_score"] > 0.05
+    for final in out["final_states"]:
+        assert abs(final[0]) < 0.15
+        assert abs(final[2]) < 0.15
 
 
 def test_linearization_is_stabilizable():

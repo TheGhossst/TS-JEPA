@@ -11,7 +11,7 @@ from ts_jepa.baselines.controllers import ControlLoopAgent
 from ts_jepa.config import actor_run_dirname, jepa_run_dirname, project_root
 from ts_jepa.data.trajectory_generator import build_env_and_teacher
 from ts_jepa.env.factory import build_inverted_cartpole_env
-from ts_jepa.evaluation.evaluate import _apply_held_force, _observation_stride
+from ts_jepa.evaluation.evaluate import _apply_held_force, control_loop_stride
 from ts_jepa.evaluation.metrics import (
     communication_reduction_report,
     control_score,
@@ -38,7 +38,7 @@ def evaluate_agent_closed_loop(
     if teacher_forces:
         _, teacher = build_env_and_teacher(config)
     steps = int(steps or config["simulation"]["trajectory_steps"])
-    stride = _observation_stride(config)
+    stride = control_loop_stride(config)
     state = env.reset(seed=seed)
     scores: list[int] = []
     forces: list[float] = []
@@ -173,7 +173,7 @@ def evaluate_with_scheduler_agent(
     rng = np.random.default_rng(seed)
     env = build_inverted_cartpole_env(cfg)
     steps = int(cfg["simulation"]["trajectory_steps"])
-    stride = _observation_stride(cfg)
+    stride = control_loop_stride(cfg)
     state = env.reset(seed=seed)
     scores: list[int] = []
     forces: list[float] = []

@@ -8,7 +8,7 @@ import numpy as np
 
 from ts_jepa.env.cartpole_ode import CartPoleODE
 from ts_jepa.env.factory import build_inverted_cartpole_env
-from ts_jepa.evaluation.evaluate import _observation_stride
+from ts_jepa.evaluation.evaluate import control_loop_stride
 
 
 def _rollout_force(ode: CartPoleODE, state: np.ndarray, force: float, stride: int) -> np.ndarray:
@@ -79,10 +79,10 @@ def default_lqr_weights() -> tuple[np.ndarray, np.ndarray]:
     return q, r
 
 
-def lqr_gain_from_config(config: dict[str, Any]) -> np.ndarray:
+def lqr_gain_from_config(config: dict[str, Any], *, stride: int | None = None) -> np.ndarray:
     env = build_inverted_cartpole_env(config)
-    stride = _observation_stride(config)
-    a, b = discrete_linearization(env.ode, stride)
+    hold = int(stride) if stride is not None else control_loop_stride(config)
+    a, b = discrete_linearization(env.ode, hold)
     q, r = default_lqr_weights()
     return discrete_lqr_gain(a, b, q, r)
 

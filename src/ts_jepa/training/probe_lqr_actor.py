@@ -34,7 +34,7 @@ from ts_jepa.evaluation.command_linear_probe import (
 )
 from ts_jepa.evaluation.evaluate import (
     _apply_held_force,
-    _observation_stride,
+    control_loop_stride,
     evaluate_closed_loop,
 )
 from ts_jepa.evaluation.metrics import control_score
@@ -494,7 +494,7 @@ def evaluate_true_state_lqr(
     steps: int | None = None,
 ) -> dict[str, Any]:
     env = build_inverted_cartpole_env(config)
-    stride = _observation_stride(config)
+    stride = control_loop_stride(config)
     steps = int(steps or config["simulation"]["trajectory_steps"])
     pos_tol = float(config["evaluation"]["control_position_tol"])
     ang_tol = float(config["evaluation"]["control_angle_tol"])
@@ -538,7 +538,7 @@ def collect_balanced_probe_pairs(
     """Encode RGB on true-state-LQR trajectories near upright (not drifting D_a)."""
     env = build_inverted_cartpole_env(config)
     steps = int(config["simulation"]["trajectory_steps"])
-    stride = _observation_stride(config)
+    stride = control_loop_stride(config)
     z_rows: list[np.ndarray] = []
     s_rows: list[np.ndarray] = []
     force_min = float(config["simulation"]["control_min_N"])
@@ -750,7 +750,7 @@ def train_probe_lqr_actor(
         p.requires_grad_(False)
 
     env = build_inverted_cartpole_env(config)
-    stride = _observation_stride(config)
+    stride = control_loop_stride(config)
     a, b = discrete_linearization(env.ode, stride)
     q, r = default_lqr_weights()
     gain = discrete_lqr_gain(a, b, q, r)

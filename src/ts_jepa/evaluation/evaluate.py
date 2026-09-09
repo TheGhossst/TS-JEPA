@@ -41,6 +41,19 @@ def _observation_stride(config: dict[str, Any]) -> int:
     return max(1, int(config["simulation"].get("observation_stride_steps", 1)))
 
 
+def control_loop_stride(config: dict[str, Any]) -> int:
+    """Physics ticks the actuator is held per closed-loop decision.
+
+    Dataset sampling stays ``simulation.observation_stride_steps`` (paper: 1 ms).
+    ``evaluation.control_hold_steps``, if set, is the control period only so a
+    100-step Eq. (28) rollout can last ~2 s (working overlay) instead of 100 ms.
+    """
+    hold = (config.get("evaluation") or {}).get("control_hold_steps")
+    if hold is not None:
+        return max(1, int(hold))
+    return _observation_stride(config)
+
+
 def _apply_held_force(env, force: float, stride: int):
     state = env.state
     for _ in range(int(stride)):
@@ -703,7 +716,7 @@ def evaluate_closed_loop(
     controller.reset_episode()
     env = build_inverted_cartpole_env(config)
     steps = steps or int(config["simulation"]["trajectory_steps"])
-    stride = _observation_stride(config)
+    stride = control_loop_stride(config)
     state = env.reset(seed=seed)
     initial_state = state.copy()
     scores = []
@@ -734,6 +747,7 @@ def evaluate_closed_loop(
         "num_steps": int(steps),
         "initial_state": initial_state.tolist(),
         "final_state": state.tolist(),
+        "control_hold_steps": int(stride),
     }
 
 
@@ -777,7 +791,7 @@ def evaluate_closed_loop_full_information_diagnostic(
     for seed in seeds:
         controller.reset_episode()
         env = build_inverted_cartpole_env(config)
-        stride = _observation_stride(config)
+        stride = control_loop_stride(config)
         state = env.reset(seed=seed)
         initial_state = state.copy()
         visited_x = [float(state[0])]
@@ -894,7 +908,7 @@ def evaluate_with_scheduler(
     rng = np.random.default_rng(seed)
     env = build_inverted_cartpole_env(config)
     steps = int(config["simulation"]["trajectory_steps"])
-    stride = _observation_stride(config)
+    stride = control_loop_stride(config)
     state = env.reset(seed=seed)
     scores: list[int] = []
     forces: list[float] = []
