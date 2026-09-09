@@ -66,6 +66,32 @@ def receive_every_kp_mask(steps: int, kp: int) -> list[bool]:
     return [((t % period) == 0) for t in range(int(steps))]
 
 
+def stability_receive_period(config: dict[str, Any]) -> int:
+    """Packet-receive period for the §15 lossy stability check.
+
+    Defaults to JEPA ``Kp``. Overlay ``evaluation.stability_receive_every`` when
+    receive-every-Kp is past the plant's open-loop cliff (dp_fixed: Kp=15 is
+    300 ms and even oracle Observer-LQR scores ~0).
+    """
+    kp = max(1, int(config["ts_jepa"]["prediction_horizon"]["Kp"]))
+    override = (config.get("evaluation") or {}).get("stability_receive_every")
+    if override is None:
+        return kp
+    return max(1, int(override))
+
+
+def runtime_encoder(controller: Any) -> FrozenRuntimeController:
+    """JEPA+actor pair for offline metrics when closed-loop uses Observer-LQR."""
+    if isinstance(controller, FrozenRuntimeController):
+        return controller
+    encoder = getattr(controller, "encoder", None)
+    if isinstance(encoder, FrozenRuntimeController):
+        return encoder
+    raise TypeError(
+        f"cannot unwrap FrozenRuntimeController from {type(controller).__name__}"
+    )
+
+
 def _apply_held_force(env, force: float, stride: int):
     state = env.state
     for _ in range(int(stride)):
@@ -270,8 +296,9 @@ def evaluate_embedding_tsne(
     test_dir = root / "trajectories" / "jepa" / "test"
     dataset = TrajectoryDataset(test_dir, config, normalizer, training=False)
     limit = int(max_samples or config.get("evaluation", {}).get("tsne_max_samples", 500))
-    device = controller.device
-    jepa = controller.jepa
+    encoder = runtime_encoder(controller)
+    device = encoder.device
+    jepa = encoder.jepa
 
     embeddings: list[np.ndarray] = []
     cart_positions: list[float] = []
@@ -607,9 +634,10 @@ def evaluate_actor_nmae(
     test_dir = root / "trajectories" / "actor" / "test"
     dataset = TrajectoryDataset(test_dir, config, normalizer, training=False)
     loader = DataLoader(dataset, batch_size=8, shuffle=False, num_workers=0)
-    device = controller.device
-    jepa = controller.jepa
-    actor = controller.actor
+    encoder = runtime_encoder(controller)
+    device = encoder.device
+    jepa = encoder.jepa
+    actor = encoder.actor
     lqr_gain = None
     if labels == "lqr":
         from ts_jepa.control.lqr import lqr_forces, lqr_gain_from_config
@@ -690,9 +718,9 @@ def evaluate_closed_loop_stability(
     seeds as control_performance** (100 + r). A single unlucky init scoring 0
     does not fail the check if the mean is > 0.
 
-    Loss pattern is receive-every-Kp (paper prediction horizon). The paper does
-    not specify a synthetic 50% alternating mask; that pattern is a harder
-    diagnostic than the working-overlay miss gate and is not used here.
+    Loss pattern is receive-every-N. N defaults to JEPA Kp. Overlays may set
+    ``evaluation.stability_receive_every`` when receive-every-Kp is past the
+    plant's open-loop cliff (not specified by the paper).
 
     ``seed`` is accepted for call-site compatibility and ignored.
     Pass ``full_runs`` to reuse control_performance rollouts.
@@ -701,7 +729,8 @@ def evaluate_closed_loop_stability(
     steps = int(steps or config["simulation"]["trajectory_steps"])
     seeds = closed_loop_eval_seeds(config)
     kp = max(1, int(config["ts_jepa"]["prediction_horizon"]["Kp"]))
-    mask = receive_every_kp_mask(steps, kp)
+    period = stability_receive_period(config)
+    mask = receive_every_kp_mask(steps, period)
 
     if full_runs is None:
         full_runs = [
@@ -737,7 +766,8 @@ def evaluate_closed_loop_stability(
         "passed": passed,
         "plan_section": "14",
         "seeds": seeds,
-        "loss_pattern": "receive_every_kp",
+        "loss_pattern": "receive_every_n",
+        "receive_every": period,
         "kp": kp,
         "control_hold_steps": int(control_loop_stride(config)),
         "full_receive": {
@@ -1021,9 +1051,10 @@ def evaluate_prediction_horizon_nmae(
     test_dir = root / "trajectories" / "jepa" / "test"
     dataset = TrajectoryDataset(test_dir, config, normalizer, training=False)
     loader = DataLoader(dataset, batch_size=8, shuffle=False, num_workers=0)
-    device = controller.device
-    jepa = controller.jepa
-    actor = controller.actor
+    encoder = runtime_encoder(controller)
+    device = encoder.device
+    jepa = encoder.jepa
+    actor = encoder.actor
     kp = int(config["ts_jepa"]["prediction_horizon"]["Kp"])
     resolution = jepa.command_resolution
     force_range = physical_force_range_n(config)
@@ -1223,6 +1254,10 @@ def baseline_report(
         "test_losses": test_losses,
         "communication_bits": bits,
         "predictor_command_resolution": load_predictor_command_resolution(config).to_dict(),
+        "closed_loop_runtime": {
+            "controller_class": type(controller).__name__,
+            "miss_behavior": getattr(controller, "miss_behavior", None),
+        },
     }
     report["baseline_validation"] = validate_baseline(report, config)
 

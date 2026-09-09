@@ -29,7 +29,7 @@ from ts_jepa.models.predictor_command_resolution import assert_plan_predictor_co
 from ts_jepa.models.predictor_plan import assert_plan_predictor_config
 from ts_jepa.device import describe_device, select_device
 from ts_jepa.evaluation.evaluate import baseline_report, write_evaluation_artifacts
-from ts_jepa.inference.infer import FrozenRuntimeController
+from ts_jepa.evaluation.runtime_factory import build_baseline_controller
 from ts_jepa.training.jepa_procedure import assert_plan_jepa_procedure_config
 from ts_jepa.training.jepa_training_plan import assert_plan_jepa_training_config
 from ts_jepa.plan.actor import (
@@ -76,6 +76,11 @@ def main() -> None:
     parser.add_argument("--skip-jepa", action="store_true")
     parser.add_argument("--skip-actor", action="store_true")
     parser.add_argument("--skip-eval", action="store_true")
+    parser.add_argument(
+        "--refit-probe",
+        action="store_true",
+        help="Refit the z→state Observer-LQR decoder even if a checkpoint exists.",
+    )
     parser.add_argument("--include-wireless", action="store_true", help="Run wireless eval only after baseline validation passes.")
     parser.add_argument("--jepa-epochs", type=int, default=None)
     parser.add_argument("--actor-epochs", type=int, default=None)
@@ -157,11 +162,12 @@ def main() -> None:
         print("Evaluating untouched test sets + baseline report (plan §15)...")
         actor_ckpt = resolve_run_checkpoint(runs_root, actor_family)
         jepa_ckpt = resolve_jepa_checkpoint_from_actor(actor_ckpt, project_dir=root)
-        controller = FrozenRuntimeController.from_checkpoints(
+        controller = build_baseline_controller(
             config,
             jepa_ckpt,
             actor_ckpt,
             device=device,
+            refit_probe=args.refit_probe,
         )
         report = baseline_report(config, controller, data_root=data_root, include_wireless=args.include_wireless)
         out_dir = runs_root / "eval"

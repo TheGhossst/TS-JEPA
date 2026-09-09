@@ -55,6 +55,8 @@ def test_dp_fixed_overlay_is_results_actor_recipe():
     assert sa["dagger"]["expert"] == "lqr"
     assert sa["dagger"]["round_selection"] == "best_closed_loop"
     assert config["evaluation"]["control_hold_steps"] == 20
+    assert config["evaluation"]["closed_loop_controller"] == "observer_lqr"
+    assert config["evaluation"]["stability_receive_every"] == 8
     # Paper asserts are no-ops when plan.enforce is false.
     assert_plan_semantic_actor_config(config)
     assert_plan_semantic_actor_training_config(config)

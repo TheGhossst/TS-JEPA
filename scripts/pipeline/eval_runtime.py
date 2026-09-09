@@ -39,6 +39,7 @@ from ts_jepa.evaluation.evaluate import (
 )
 from ts_jepa.evaluation.metrics import summarize_scores
 from ts_jepa.evaluation.plotting import plot_embedding_tsne, plot_nmae_by_horizon, plot_wireless_control_scores
+from ts_jepa.evaluation.runtime_factory import wrap_closed_loop_controller
 from ts_jepa.inference.infer import FrozenRuntimeController
 from ts_jepa.plan.baseline_validation import assert_plan_baseline_validation_config
 from ts_jepa.plan.wireless import assert_plan_wireless_config
@@ -70,6 +71,11 @@ def main() -> None:
         "--force-wireless",
         action="store_true",
         help="With wireless mode: skip baseline validation gate (debug only).",
+    )
+    parser.add_argument(
+        "--refit-probe",
+        action="store_true",
+        help="Refit the z→state Observer-LQR decoder even if a checkpoint exists.",
     )
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument(
@@ -117,7 +123,17 @@ def main() -> None:
     print(f"actor_checkpoint={actor_ckpt}")
     print(f"mode={args.mode} out_dir={out_dir}")
 
-    controller = FrozenRuntimeController.from_checkpoints(config, jepa_ckpt, actor_ckpt, device=device)
+    encoder = FrozenRuntimeController.from_checkpoints(config, jepa_ckpt, actor_ckpt, device=device)
+    if args.mode == "closed_loop_diagnostic":
+        controller = encoder
+    else:
+        controller = wrap_closed_loop_controller(
+            config,
+            encoder,
+            jepa_checkpoint=jepa_ckpt,
+            actor_checkpoint=actor_ckpt,
+            refit_probe=args.refit_probe,
+        )
 
     if args.mode in ("baseline", "all"):
         report = baseline_report(

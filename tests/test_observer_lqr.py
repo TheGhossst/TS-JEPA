@@ -94,6 +94,36 @@ def test_true_position_observer_lqr_beats_zero_on_working_seeds():
     assert float(np.mean(scores)) == pytest.approx(true["mean_control_score"], abs=0.15)
 
 
+def test_true_position_observer_kp_loss_beats_zero_on_dp_fixed():
+    """Oracle (x,θ) observer + LQR under the overlay stability receive period."""
+    from ts_jepa.evaluation.evaluate import (
+        control_loop_stride,
+        receive_every_kp_mask,
+        stability_receive_period,
+    )
+
+    config = load_config("configs/ts_jepa_dp_fixed.yaml")
+    env = build_inverted_cartpole_env(config)
+    a, b = discrete_linearization(env.ode, control_loop_stride(config))
+    gain = lqr_gain_from_config(config)
+    ctrl = TruePositionObserverLQRController(
+        config, gain, a, b[:, 0], alpha=0.5, beta=0.3, full_information=False
+    )
+    steps = int(config["simulation"]["trajectory_steps"])
+    period = stability_receive_period(config)
+    assert period == 8
+    mask = receive_every_kp_mask(steps, period)
+    scores = [
+        float(
+            evaluate_closed_loop(
+                config, ctrl, seed=seed, packet_receive_mask=mask
+            )["mean_control_score"]
+        )
+        for seed in (100, 102)
+    ]
+    assert float(np.mean(scores)) > 0.3
+
+
 def test_true_position_observer_predicts_on_miss():
     config, gain, a, b = _working_lqr()
     ctrl = TruePositionObserverLQRController(

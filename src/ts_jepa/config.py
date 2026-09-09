@@ -26,6 +26,17 @@ def actor_run_dirname(config: dict[str, Any]) -> str:
     return str(config.get("paths", {}).get("semantic_actor_dirname", "semantic_actor"))
 
 
+def probe_lqr_run_dirname(config: dict[str, Any], decoder: str = "linear") -> str:
+    """z→state probe checkpoint family under runs_root."""
+    overlay = config.get("paths", {}).get("probe_lqr_dirname")
+    if overlay:
+        return str(overlay)
+    actor = actor_run_dirname(config)
+    if str(decoder) == "mlp":
+        return f"{actor}_probe_lqr_mlp"
+    return f"{actor}_probe_lqr"
+
+
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     """Recursive dict merge; overlay wins. Non-dict values replace."""
     out = dict(base)

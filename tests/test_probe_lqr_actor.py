@@ -35,6 +35,27 @@ def test_true_state_lqr_beats_zero_on_dp_fixed_with_control_hold():
         assert abs(final[2]) < 0.15
 
 
+def test_observer_dt_uses_control_hold_not_dataset_stride():
+    from ts_jepa.training.probe_lqr_actor import _dt_obs_from_config
+
+    paper = load_config()
+    results = load_config("configs/ts_jepa_dp_fixed.yaml")
+    working = load_config("configs/ts_jepa_working.yaml")
+    assert _dt_obs_from_config(paper) == pytest.approx(0.001)
+    assert _dt_obs_from_config(results) == pytest.approx(0.02)
+    assert _dt_obs_from_config(working) == pytest.approx(0.02)
+
+
+def test_probe_lqr_dirname_follows_actor_family():
+    from ts_jepa.config import probe_lqr_run_dirname
+
+    working = load_config("configs/ts_jepa_working.yaml")
+    results = load_config("configs/ts_jepa_dp_fixed.yaml")
+    assert probe_lqr_run_dirname(working, "linear") == "semantic_actor_working_probe_lqr"
+    assert probe_lqr_run_dirname(working, "mlp") == "semantic_actor_working_probe_lqr_mlp"
+    assert probe_lqr_run_dirname(results, "linear") == "semantic_actor_dp_fixed_probe_lqr"
+
+
 def test_linearization_is_stabilizable():
     config = load_config("configs/ts_jepa_working.yaml")
     env = build_inverted_cartpole_env(config)

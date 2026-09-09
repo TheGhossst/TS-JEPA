@@ -84,6 +84,7 @@ def test_dp_fixed_control_hold_is_20ms_not_dataset_stride():
     assert control_loop_stride(paper) == 1
     assert _observation_stride(results) == 1
     assert control_loop_stride(results) == 20
+    assert results["evaluation"]["stability_receive_every"] == 8
 
 
 def test_receive_every_kp_mask_matches_prediction_horizon():
@@ -130,7 +131,8 @@ def test_stability_mean_passes_when_one_seed_is_zero(monkeypatch):
         "ts_jepa.evaluation.evaluate.evaluate_closed_loop", fake_closed_loop
     )
     out = evaluate_closed_loop_stability(config, controller=None)  # type: ignore[arg-type]
-    assert out["loss_pattern"] == "receive_every_kp"
+    assert out["loss_pattern"] == "receive_every_n"
+    assert out["receive_every"] == 8
     assert out["full_receive"]["per_seed"][1] == 0.0
     assert out["full_receive"]["mean_control_score"] > 0.0
     assert out["intermittent_loss"]["mean_control_score"] > 0.0
@@ -138,6 +140,26 @@ def test_stability_mean_passes_when_one_seed_is_zero(monkeypatch):
     lossy = [c for c in calls if c["mask"] is not None]
     assert [c["seed"] for c in lossy] == seeds
     steps = int(config["simulation"]["trajectory_steps"])
-    kp = int(config["ts_jepa"]["prediction_horizon"]["Kp"])
-    expected = receive_every_kp_mask(steps, kp)
+    expected = receive_every_kp_mask(steps, 8)
     assert all(c["mask"] == expected for c in lossy)
+
+
+def test_runtime_encoder_unwraps_observer_wrapper():
+    from types import SimpleNamespace
+
+    from ts_jepa.evaluation.evaluate import runtime_encoder
+    from ts_jepa.inference.infer import FrozenRuntimeController
+
+    encoder = FrozenRuntimeController.__new__(FrozenRuntimeController)
+    assert runtime_encoder(encoder) is encoder
+    wrapped = SimpleNamespace(encoder=encoder)
+    assert runtime_encoder(wrapped) is encoder
+
+
+def test_closed_loop_controller_kind_from_dp_fixed():
+    from ts_jepa.evaluation.runtime_factory import closed_loop_controller_kind
+
+    paper = load_config()
+    results = load_config("configs/ts_jepa_dp_fixed.yaml")
+    assert closed_loop_controller_kind(paper) == "semantic_actor"
+    assert closed_loop_controller_kind(results) == "observer_lqr"

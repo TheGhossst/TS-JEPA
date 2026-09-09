@@ -54,5 +54,19 @@ semantic_actor:
 # 100 stored decisions × 1 ms = 100 ms, which cannot enter |x|,|θ|≤0.05 from
 # init_noise=0.35 (even oracle LQR scores ~0). Hold each command 20 ms so a
 # 100-step Eq. (28) rollout is 2 s — same wall-clock as the working overlay.
+#
+# Closed-loop uses Observer-LQR (decode (x,θ) from z, α-β velocities, discrete
+# LQR). The z→u MLP + Pφ miss path scores ~0 under receive-every-Kp even when
+# full-receive Eq. (28) is > 0. Offline actor NMAE still evaluates Cε.
+#
+# Receive-every-15 (300 ms at 20 ms hold) is past a cliff: even oracle (x,θ)
+# Observer-LQR scores ~0.004. Every 8 steps (160 ms) still drops 7/8 packets
+# and oracle scores ~0.5. Kp remains 15 for the JEPA predictor.
 evaluation:
   control_hold_steps: 20
+  closed_loop_controller: observer_lqr
+  stability_receive_every: 8
+  observer_lqr:
+    decoder: linear
+    alpha: 0.5
+    beta: 0.3

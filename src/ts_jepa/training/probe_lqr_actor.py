@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from ts_jepa.config import actor_run_dirname, jepa_run_dirname, project_root
+from ts_jepa.config import actor_run_dirname, jepa_run_dirname, probe_lqr_run_dirname, project_root
 from ts_jepa.control.lqr import (
     discrete_linearization,
     discrete_lqr_gain,
@@ -132,13 +132,12 @@ def finite_difference_state(
 
 
 def _dt_obs_from_encoder(encoder: FrozenRuntimeController) -> float:
-    stride = max(1, int(encoder.config["simulation"].get("observation_stride_steps", 1)))
-    return float(stride) * float(encoder.config["simulation"]["dt"])
+    return _dt_obs_from_config(encoder.config)
 
 
 def _dt_obs_from_config(config: dict[str, Any]) -> float:
-    stride = max(1, int(config["simulation"].get("observation_stride_steps", 1)))
-    return float(stride) * float(config["simulation"]["dt"])
+    """Seconds between closed-loop decisions (control hold, not dataset stride)."""
+    return float(control_loop_stride(config)) * float(config["simulation"]["dt"])
 
 
 def _closed_loop_seed_block(
@@ -713,6 +712,13 @@ def evaluate_observer_lqr(
     return report
 
 
+def observer_lqr_checkpoint_path(config: dict[str, Any], decoder: str = "linear") -> Path:
+    runs = project_root(config) / config["paths"]["runs_root"]
+    name = probe_lqr_run_dirname(config, decoder)
+    fname = "decoder.pt" if str(decoder) == "mlp" else "probe_lqr.npz"
+    return runs / name / fname
+
+
 def train_probe_lqr_actor(
     config: dict[str, Any],
     *,
@@ -721,6 +727,7 @@ def train_probe_lqr_actor(
     device: torch.device | None = None,
     data_root: Path | None = None,
     decoder: str = "linear",
+    run_closed_loop_eval: bool = True,
 ) -> dict[str, Any]:
     """Fit z→state probe + LQR. Does not update JEPA. Writes a readout checkpoint."""
     device = select_device(device)
@@ -740,9 +747,7 @@ def train_probe_lqr_actor(
         actor_run_dirname(config),
         explicit=Path(actor_checkpoint) if actor_checkpoint else None,
     )
-    out_dir = runs / (
-        "semantic_actor_working_probe_lqr_mlp" if decoder == "mlp" else "semantic_actor_working_probe_lqr"
-    )
+    out_dir = observer_lqr_checkpoint_path(config, decoder).parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
     encoder = FrozenRuntimeController.from_checkpoints(config, jepa_ckpt, actor_ckpt, device=device)
@@ -772,21 +777,6 @@ def train_probe_lqr_actor(
         flush=True,
     )
 
-    seeds = [
-        int(s)
-        for s in config.get("evaluation", {}).get("working_gates", {}).get(
-            "closed_loop_seeds", [100, 101, 102]
-        )
-    ]
-    true_lqr = evaluate_true_state_lqr(config, gain, seeds=seeds)
-    controller = ProbeLQRRuntimeController(encoder, probe, gain, a, b[:, 0], full_information=False)
-    full_scores = [
-        float(evaluate_closed_loop(config, controller, seed=seed)["mean_control_score"])
-        for seed in seeds
-    ]
-    controller = ProbeLQRRuntimeController(encoder, probe, gain, a, b[:, 0], full_information=False)
-    working = evaluate_closed_loop_working_gates(config, controller)
-
     payload = {
         "decoder": decoder,
         "probe_z_mean": probe["z_mean"],
@@ -796,9 +786,10 @@ def train_probe_lqr_actor(
         "B": b,
         "jepa_checkpoint": str(jepa_ckpt.resolve()),
     }
+    ckpt_path = observer_lqr_checkpoint_path(config, decoder)
     if decoder == "linear":
         payload["probe_coefs"] = probe["coefs"]
-        np.savez_compressed(out_dir / "probe_lqr.npz", **payload)
+        np.savez_compressed(ckpt_path, **payload)
     else:
         torch.save(
             {
@@ -808,14 +799,34 @@ def train_probe_lqr_actor(
                 "y_std": probe["y_std"],
                 "hidden": probe["hidden"],
             },
-            out_dir / "decoder.pt",
+            ckpt_path,
         )
-    report = {
+
+    seeds = [
+        int(s)
+        for s in config.get("evaluation", {}).get("working_gates", {}).get(
+            "closed_loop_seeds", [100, 101, 102]
+        )
+    ]
+    true_lqr = None
+    full_scores: list[float] | None = None
+    working = None
+    if run_closed_loop_eval:
+        true_lqr = evaluate_true_state_lqr(config, gain, seeds=seeds)
+        controller = ProbeLQRRuntimeController(encoder, probe, gain, a, b[:, 0], full_information=False)
+        full_scores = [
+            float(evaluate_closed_loop(config, controller, seed=seed)["mean_control_score"])
+            for seed in seeds
+        ]
+        controller = ProbeLQRRuntimeController(encoder, probe, gain, a, b[:, 0], full_information=False)
+        working = evaluate_closed_loop_working_gates(config, controller)
+
+    report: dict[str, Any] = {
         "method": "probe_lqr",
         "decoder": decoder,
         "jepa_updated": False,
         "jepa_checkpoint": str(jepa_ckpt),
-        "checkpoint": str(out_dir / ("decoder.pt" if decoder == "mlp" else "probe_lqr.npz")),
+        "checkpoint": str(ckpt_path),
         "probe_mae_state": {
             "x": float(probe_mae[0]),
             "x_dot": float(probe_mae[1]),
@@ -824,17 +835,18 @@ def train_probe_lqr_actor(
         },
         "n_probe_samples": int(z_train.shape[0]),
         "lqr_gain": gain.reshape(-1).tolist(),
-        "true_state_lqr": true_lqr,
-        "probe_lqr_full_information": {
-            "seeds": seeds,
-            "mean_control_score": float(np.mean(full_scores)),
-            "per_seed": full_scores,
-        },
-        "working_gate": working,
         "note": (
             "DP teacher rollouts on D_a already have Eq. 28 score 0 (cart walks off). "
             "This actor is LQR on a frozen-z state probe, not behavior cloning of the teacher."
         ),
     }
+    if run_closed_loop_eval:
+        report["true_state_lqr"] = true_lqr
+        report["probe_lqr_full_information"] = {
+            "seeds": seeds,
+            "mean_control_score": float(np.mean(full_scores or [0.0])),
+            "per_seed": full_scores,
+        }
+        report["working_gate"] = working
     (out_dir / "metrics.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return report
