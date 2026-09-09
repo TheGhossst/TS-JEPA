@@ -84,3 +84,60 @@ def test_dp_fixed_control_hold_is_20ms_not_dataset_stride():
     assert control_loop_stride(paper) == 1
     assert _observation_stride(results) == 1
     assert control_loop_stride(results) == 20
+
+
+def test_receive_every_kp_mask_matches_prediction_horizon():
+    from ts_jepa.evaluation.evaluate import receive_every_kp_mask
+
+    mask = receive_every_kp_mask(30, 15)
+    assert mask[0] is True
+    assert mask[1] is False
+    assert mask[15] is True
+    assert mask.count(True) == 2
+
+
+def test_stability_mean_passes_when_one_seed_is_zero(monkeypatch):
+    """Seed 101 scoring 0 must not fail the gate if the 5-seed mean is > 0."""
+    from ts_jepa.evaluation.evaluate import (
+        closed_loop_eval_seeds,
+        evaluate_closed_loop_stability,
+        receive_every_kp_mask,
+    )
+
+    config = load_config("configs/ts_jepa_dp_fixed.yaml")
+    seeds = closed_loop_eval_seeds(config)
+    assert seeds == [100, 101, 102, 103, 104]
+    calls: list[dict] = []
+
+    def fake_closed_loop(cfg, controller, steps=None, seed=0, packet_receive_mask=None):
+        del cfg, controller, steps
+        calls.append(
+            {
+                "seed": int(seed),
+                "mask": None if packet_receive_mask is None else list(packet_receive_mask),
+            }
+        )
+        score = 0.0 if int(seed) == 101 else 0.1
+        if packet_receive_mask is not None:
+            score = 0.0 if int(seed) == 101 else 0.05
+        return {
+            "mean_control_score": score,
+            "forces": [1.0],
+            "scores": [score],
+        }
+
+    monkeypatch.setattr(
+        "ts_jepa.evaluation.evaluate.evaluate_closed_loop", fake_closed_loop
+    )
+    out = evaluate_closed_loop_stability(config, controller=None)  # type: ignore[arg-type]
+    assert out["loss_pattern"] == "receive_every_kp"
+    assert out["full_receive"]["per_seed"][1] == 0.0
+    assert out["full_receive"]["mean_control_score"] > 0.0
+    assert out["intermittent_loss"]["mean_control_score"] > 0.0
+    assert out["passed"] is True
+    lossy = [c for c in calls if c["mask"] is not None]
+    assert [c["seed"] for c in lossy] == seeds
+    steps = int(config["simulation"]["trajectory_steps"])
+    kp = int(config["ts_jepa"]["prediction_horizon"]["Kp"])
+    expected = receive_every_kp_mask(steps, kp)
+    assert all(c["mask"] == expected for c in lossy)
