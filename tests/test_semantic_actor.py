@@ -18,6 +18,7 @@ from ts_jepa.plan.actor import (
     assert_plan_semantic_actor_config,
     assert_plan_semantic_actor_training_config,
 )
+from ts_jepa.plan.enforce import plan_enforced
 from ts_jepa.training.train_actor import _assert_encoder_frozen, _assert_optimizer_only_actor
 
 
@@ -42,8 +43,17 @@ def test_baseline_config_matches_plan_section12():
     assert config["evaluation"]["reported_result"] == "best"
 
 
-def test_dp_fixed_overlay_preserves_actor_plan():
+def test_dp_fixed_overlay_is_results_actor_recipe():
     config = load_config("configs/ts_jepa_dp_fixed.yaml")
+    assert plan_enforced(config) is False
+    sa = config["semantic_actor"]
+    assert sa["loss"] == "Huber"
+    assert sa["large_force_weight"] == 10.0
+    assert sa["architecture"]["layernorm"] is True
+    assert sa["early_stopping"]["split"] == "shuffled_trajectories"
+    assert sa["dagger"]["enabled"] is True
+    assert sa["dagger"]["expert"] == "lqr"
+    # Paper asserts are no-ops when plan.enforce is false.
     assert_plan_semantic_actor_config(config)
     assert_plan_semantic_actor_training_config(config)
 
@@ -71,6 +81,17 @@ def test_semantic_actor_from_config_matches_plan():
     z = torch.randn(4, 256)
     u = actor(z)
     assert u.shape == (4, 1)
+
+
+def test_results_actor_layernorm_from_dp_fixed_config():
+    config = load_config("configs/ts_jepa_dp_fixed.yaml")
+    actor = SemanticActor.from_config(config)
+    assert any(isinstance(m, nn.LayerNorm) for m in actor.net)
+    actor.assert_plan_architecture()
+    z = torch.randn(3, 256)
+    u = actor(z)
+    assert u.shape == (3, 1)
+    assert torch.isfinite(u).all()
 
 
 def test_semantic_actor_rejects_wrong_hidden_depth():

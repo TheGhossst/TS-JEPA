@@ -28,6 +28,9 @@ class SemanticActor(nn.Module):
         hidden_dims: tuple[int, ...] | list[int] = (1024, 256),
         dropout: float = 0.2,
         command_dim: int = 1,
+        *,
+        layernorm: bool = False,
+        output_init_scale: float = 1.0,
     ) -> None:
         super().__init__()
         hidden = tuple(int(h) for h in hidden_dims)
@@ -39,15 +42,29 @@ class SemanticActor(nn.Module):
         self.hidden_dims = hidden
         self.command_dim = int(command_dim)
         self.dropout_p = float(dropout)
-        self.net = nn.Sequential(
-            nn.Linear(self.embedding_dim, hidden[0]),
-            nn.ReLU(inplace=True),
-            nn.Dropout(self.dropout_p),
-            nn.Linear(hidden[0], hidden[1]),
-            nn.ReLU(inplace=True),
-            nn.Dropout(self.dropout_p),
-            nn.Linear(hidden[1], self.command_dim),
+        self.layernorm = bool(layernorm)
+        layers: list[nn.Module] = []
+        if self.layernorm:
+            layers.append(nn.LayerNorm(self.embedding_dim))
+        layers.extend(
+            [
+                nn.Linear(self.embedding_dim, hidden[0]),
+                nn.ReLU(inplace=True),
+                nn.Dropout(self.dropout_p),
+                nn.Linear(hidden[0], hidden[1]),
+                nn.ReLU(inplace=True),
+                nn.Dropout(self.dropout_p),
+                nn.Linear(hidden[1], self.command_dim),
+            ]
         )
+        self.net = nn.Sequential(*layers)
+        scale = float(output_init_scale)
+        if scale != 1.0:
+            last = self.net[-1]
+            if isinstance(last, nn.Linear):
+                last.weight.data.mul_(scale)
+                if last.bias is not None:
+                    last.bias.data.zero_()
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "SemanticActor":
@@ -59,6 +76,8 @@ class SemanticActor(nn.Module):
             hidden_dims=tuple(arch["hidden_dims"]),
             dropout=float(arch.get("dropout", 0.2)),
             command_dim=int(PLAN_SEMANTIC_ACTOR["output_dim"]),
+            layernorm=bool(arch.get("layernorm", False)),
+            output_init_scale=float(arch.get("output_init_scale", 1.0)),
         )
 
     def forward(self, embedding: torch.Tensor) -> torch.Tensor:

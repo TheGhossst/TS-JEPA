@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import math
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +18,16 @@ from ts_jepa.evaluation.checkpoints import resolve_run_checkpoint
 from ts_jepa.models.actor import SemanticActor
 from ts_jepa.models.ts_jepa import TSJEPA
 from ts_jepa.plan.actor import PLAN_SEMANTIC_ACTOR
-from ts_jepa.training.actor_helpers import evaluate_mse, mean_command_baseline_mse, split_train_val_actor
+from ts_jepa.plan.enforce import plan_enforced
+from ts_jepa.training.actor_helpers import (
+    actor_loss_kwargs,
+    actor_regression_loss,
+    actor_train_recipe_id,
+    evaluate_actor_objective,
+    evaluate_mse,
+    mean_command_baseline_mse,
+    split_train_val_actor,
+)
 from ts_jepa.runtime import (
     CUDAPrefetcher,
     DataLoaderStallError,
@@ -51,6 +62,32 @@ def _assert_encoder_frozen(jepa: TSJEPA) -> None:
             "plan §12 requires frozen TS-JEPA during actor training; "
             f"trainable JEPA params remain: {trainable[:8]}"
         )
+
+
+def _set_actor_lr(
+    optimizer: torch.optim.Optimizer,
+    *,
+    base_lr: float,
+    epoch: int,
+    epochs: int,
+    warmup_epochs: int,
+    schedule: str,
+) -> float:
+    kind = str(schedule or "constant").strip().lower()
+    if kind in {"", "constant", "none"}:
+        lr = float(base_lr)
+    elif kind == "cosine":
+        warm = max(int(warmup_epochs), 0)
+        if warm > 0 and epoch <= warm:
+            lr = float(base_lr) * float(epoch) / float(max(warm, 1))
+        else:
+            t = (epoch - warm) / max(int(epochs) - warm, 1)
+            lr = float(base_lr) * 0.5 * (1.0 + math.cos(math.pi * min(max(t, 0.0), 1.0)))
+    else:
+        raise ValueError(f"unknown actor lr_schedule {schedule!r}")
+    for group in optimizer.param_groups:
+        group["lr"] = lr
+    return lr
 
 
 def _assert_optimizer_only_actor(optimizer: torch.optim.Optimizer, actor: SemanticActor) -> None:
@@ -167,18 +204,21 @@ def _train_semantic_actor_body(
         torch.cuda.empty_cache()
 
     val_fraction = float(config["semantic_actor"]["early_stopping"].get("val_fraction", 0.2))
-    train_ds, val_ds = split_train_val_actor(train_full, val_fraction)
+    split_mode = str(config["semantic_actor"]["early_stopping"].get("split", "contiguous"))
+    train_ds, val_ds = split_train_val_actor(
+        train_full, val_fraction, seed=seed, mode=split_mode
+    )
 
     opt_cfg = config["semantic_actor"]["optimizer"]
     actor = SemanticActor.from_config(config).to(device)
-    if (
+    if plan_enforced(config) and (
         int(config["ts_jepa"]["encoder"]["embedding_dim"]) == PLAN_SEMANTIC_ACTOR["input_dim"]
         and list(config["semantic_actor"]["architecture"]["hidden_dims"])
         == PLAN_SEMANTIC_ACTOR["hidden_dims"]
     ):
         actor.assert_plan_architecture()
 
-    if str(opt_cfg.get("type", "AdamW")) != "AdamW":
+    if plan_enforced(config) and str(opt_cfg.get("type", "AdamW")) != "AdamW":
         raise ValueError(
             f"plan §12 requires AdamW for the semantic actor; got {opt_cfg.get('type')!r}"
         )
@@ -188,12 +228,13 @@ def _train_semantic_actor_body(
         weight_decay=float(opt_cfg.get("weight_decay", 0.01)),
     )
     _assert_optimizer_only_actor(optimizer, actor)
-    # Plan §12 Eq. 15: L_actor = MSE(ũ, u) in physical Newtons.
-    if str(config["semantic_actor"].get("loss", "MSE")) != "MSE":
+    loss_name = str(config["semantic_actor"].get("loss", "MSE"))
+    if plan_enforced(config) and loss_name.upper() != "MSE":
         raise ValueError(
             f"plan §12 requires MSE actor loss; got {config['semantic_actor'].get('loss')!r}"
         )
-    criterion = nn.MSELoss()
+    loss_kwargs = actor_loss_kwargs(config)
+    report_criterion = nn.MSELoss()
     batch_size = int(opt_cfg["batch_size"])
     train_loader = make_dataloader(
         train_ds,
@@ -221,13 +262,40 @@ def _train_semantic_actor_body(
 
     epochs = int(max_epochs if max_epochs is not None else opt_cfg["epochs"])
     patience = int(config["semantic_actor"]["early_stopping"]["patience"])
+    min_epochs = int(config["semantic_actor"]["early_stopping"].get("min_epochs", 0))
+    grad_clip = float(config["semantic_actor"].get("grad_clip_norm", 0.0) or 0.0)
+    schedule = str(config["semantic_actor"].get("lr_schedule", "constant"))
+    warmup_epochs = int(config["semantic_actor"].get("lr_warmup_epochs", 0))
+    base_lr = float(opt_cfg["learning_rate"])
+    scaler = (
+        torch.amp.GradScaler("cuda")
+        if amp_dtype is torch.float16 and device.type == "cuda"
+        else None
+    )
+    recipe = actor_train_recipe_id(config)
     best_val = float("inf")
     best_state = None
     best_epoch = 0
     stale = 0
     history = []
+    last_epoch = 0
+
+    watchdog.log(
+        f"actor recipe={recipe} loss={loss_name} split={split_mode} "
+        f"large_force_weight={loss_kwargs['large_force_weight']} "
+        f"std_match_weight={loss_kwargs['std_match_weight']} min_epochs={min_epochs}"
+    )
 
     for epoch in range(1, epochs + 1):
+        last_epoch = epoch
+        lr_now = _set_actor_lr(
+            optimizer,
+            base_lr=base_lr,
+            epoch=epoch,
+            epochs=epochs,
+            warmup_epochs=warmup_epochs,
+            schedule=schedule,
+        )
         actor.train()
         train_loss = 0.0
         n_batches = 0
@@ -245,16 +313,30 @@ def _train_semantic_actor_body(
                 try:
                     emb = batch["embedding"]
                     target = batch["command"]
+                    optimizer.zero_grad(set_to_none=True)
                     if amp_dtype is not None and device.type == "cuda":
                         with torch.autocast(device_type="cuda", dtype=amp_dtype):
                             pred = actor(emb)
-                            loss = criterion(pred, target)
+                            loss = actor_regression_loss(pred, target, **loss_kwargs)
+                        if scaler is not None:
+                            scaler.scale(loss).backward()
+                            if grad_clip > 0:
+                                scaler.unscale_(optimizer)
+                                torch.nn.utils.clip_grad_norm_(actor.parameters(), grad_clip)
+                            scaler.step(optimizer)
+                            scaler.update()
+                        else:
+                            loss.backward()
+                            if grad_clip > 0:
+                                torch.nn.utils.clip_grad_norm_(actor.parameters(), grad_clip)
+                            optimizer.step()
                     else:
                         pred = actor(emb)
-                        loss = criterion(pred, target)
-                    optimizer.zero_grad(set_to_none=True)
-                    loss.backward()
-                    optimizer.step()
+                        loss = actor_regression_loss(pred, target, **loss_kwargs)
+                        loss.backward()
+                        if grad_clip > 0:
+                            torch.nn.utils.clip_grad_norm_(actor.parameters(), grad_clip)
+                        optimizer.step()
                     step_loss = float(loss.detach().item())
                 except Exception as exc:
                     reraise_cuda_context(
@@ -274,11 +356,22 @@ def _train_semantic_actor_body(
 
         watchdog.set_stage("validate")
         try:
-            val_loss = evaluate_mse(actor, val_loader, device, criterion)
+            val_loss = evaluate_actor_objective(
+                actor, val_loader, device, loss_kwargs=loss_kwargs
+            )
         except Exception as exc:
             reraise_cuda_context(exc, where=f"actor epoch {epoch} validation", device=device)
-        history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
-        watchdog.log(f"epoch={epoch} train_loss={train_loss:.6f} val_loss={val_loss:.6f}")
+        history.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "lr": lr_now,
+            }
+        )
+        watchdog.log(
+            f"epoch={epoch} lr={lr_now:.6g} train_loss={train_loss:.6f} val_loss={val_loss:.6f}"
+        )
         if should_release_cuda_cache(device, runtime_cfg):
             release_cuda_cache(device)
 
@@ -297,13 +390,18 @@ def _train_semantic_actor_body(
                     "val_loss": best_val,
                     "seed": seed,
                     "selection_split": "actor_train_holdout_validation",
+                    "train_recipe": recipe,
                 },
             )
             watchdog.log(f"saved best.pt epoch={epoch} val_loss={best_val:.6f}")
-        else:
+        elif epoch >= min_epochs:
             stale += 1
 
-        if config["semantic_actor"]["early_stopping"]["enabled"] and stale >= patience:
+        if (
+            config["semantic_actor"]["early_stopping"]["enabled"]
+            and epoch >= min_epochs
+            and stale >= patience
+        ):
             watchdog.log(f"early stop epoch={epoch} stale={stale}")
             break
 
@@ -312,7 +410,7 @@ def _train_semantic_actor_body(
 
     watchdog.set_stage("test")
     try:
-        test_loss = evaluate_mse(actor, test_loader, device, criterion)
+        test_loss = evaluate_mse(actor, test_loader, device, report_criterion)
     except Exception as exc:
         reraise_cuda_context(exc, where="actor untouched test", device=device)
 
@@ -335,12 +433,14 @@ def _train_semantic_actor_body(
             "val_loss": best_val,
             "test_loss": test_loss,
             "seed": seed,
-            "epoch": int(best_epoch),
+            "epoch": int(last_epoch),
+            "best_epoch": int(best_epoch),
             "history": history,
             "selection_split": "actor_train_holdout_validation",
             "mean_command_baseline_mse_train": mean_baseline_train,
             "mean_command_baseline_mse_test": mean_baseline_test,
             "beats_mean_command_baseline": beats_mean_baseline,
+            "train_recipe": recipe,
         },
     )
     with (runs / "metrics.json").open("w", encoding="utf-8") as handle:
@@ -354,6 +454,7 @@ def _train_semantic_actor_body(
                 "mean_command_baseline_mse_train": mean_baseline_train,
                 "mean_command_baseline_mse_test": mean_baseline_test,
                 "beats_mean_command_baseline": beats_mean_baseline,
+                "train_recipe": recipe,
             },
             handle,
             indent=2,
@@ -368,23 +469,31 @@ def _train_semantic_actor_body(
         "checkpoint": str(runs / "best.pt"),
         "mean_command_baseline_mse_test": mean_baseline_test,
         "beats_mean_command_baseline": beats_mean_baseline,
+        "train_recipe": recipe,
     }
 
 
-def seed_actor_training_complete(run_dir: Path, expected_epochs: int) -> bool:
-    """True when an actor seed finished the requested epoch budget and wrote last.pt + test_loss."""
+def seed_actor_training_complete(
+    run_dir: Path,
+    expected_epochs: int,
+    *,
+    recipe: str | None = None,
+) -> bool:
+    """True when an actor seed finished and wrote last.pt + test_loss for this recipe."""
+    del expected_epochs  # early-stop is allowed; recipe + test_loss mark a finished seed
     metrics_path = run_dir / "metrics.json"
     last_path = run_dir / "last.pt"
-    if not metrics_path.is_file() or not last_path.is_file():
+    if not metrics_path.is_file() or not last_path.is_file() or not (run_dir / "best.pt").is_file():
         return False
     checkpoint = load_checkpoint(last_path)
     if "test_loss" not in checkpoint:
         return False
-    history = checkpoint.get("history") or []
-    history_epochs = len(history)
-    epoch = int(checkpoint.get("epoch") or history_epochs)
-    reached = max(epoch, history_epochs)
-    return reached >= int(expected_epochs)
+    if recipe is not None:
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        stored = str(metrics.get("train_recipe") or checkpoint.get("train_recipe") or "")
+        if stored != str(recipe):
+            return False
+    return True
 
 
 def _load_completed_actor_seed_result(run_dir: Path) -> dict[str, Any]:
@@ -399,7 +508,37 @@ def _load_completed_actor_seed_result(run_dir: Path) -> dict[str, Any]:
         "checkpoint": str(run_dir / "best.pt"),
         "mean_command_baseline_mse_test": metrics.get("mean_command_baseline_mse_test"),
         "beats_mean_command_baseline": metrics.get("beats_mean_command_baseline"),
+        "train_recipe": metrics.get("train_recipe"),
     }
+
+
+def _maybe_refine_actor_dagger(
+    config: dict[str, Any],
+    *,
+    jepa_checkpoint: Path,
+    actor_checkpoint: Path,
+    device: torch.device,
+    data_root: Path | None,
+    max_epochs: int | None,
+) -> dict[str, Any] | None:
+    dagger_cfg = config.get("semantic_actor", {}).get("dagger") or {}
+    if not bool(dagger_cfg.get("enabled", False)):
+        return None
+    if max_epochs is not None and int(max_epochs) <= 3:
+        return None
+    from ts_jepa.training.dagger_actor import train_actor_dagger
+
+    overrides = {k: v for k, v in dagger_cfg.items() if k != "enabled"}
+    print("actor: LQR DAgger refinement (closed-loop recovery data)", flush=True)
+    return train_actor_dagger(
+        config,
+        jepa_checkpoint=jepa_checkpoint,
+        actor_checkpoint=actor_checkpoint,
+        device=device,
+        data_root=data_root,
+        skip_eval=False,
+        settings_overrides=overrides,
+    )
 
 
 def train_semantic_actor_repetitions(
@@ -424,11 +563,12 @@ def train_semantic_actor_repetitions(
     expected_epochs = int(
         max_epochs if max_epochs is not None else config["semantic_actor"]["optimizer"]["epochs"]
     )
+    recipe = actor_train_recipe_id(config)
 
     seed_results = []
     for seed in seeds:
         seed_dir = root_runs / f"seed_{seed}"
-        if seed_actor_training_complete(seed_dir, expected_epochs):
+        if seed_actor_training_complete(seed_dir, expected_epochs, recipe=recipe):
             seed_results.append(_load_completed_actor_seed_result(seed_dir))
             continue
         result = train_semantic_actor(
@@ -452,16 +592,43 @@ def train_semantic_actor_repetitions(
         for r in seed_results
     ]
     torch.save(selected, root_runs / "best.pt")
+    dagger_report = _maybe_refine_actor_dagger(
+        config,
+        jepa_checkpoint=ckpt_path,
+        actor_checkpoint=root_runs / "best.pt",
+        device=select_device(device),
+        data_root=data_root,
+        max_epochs=max_epochs,
+    )
+    if dagger_report and dagger_report.get("checkpoint"):
+        dagger_path = Path(dagger_report["checkpoint"])
+        if dagger_path.is_file():
+            shutil.copy2(dagger_path, root_runs / "best.pt")
+            selected = torch.load(root_runs / "best.pt", map_location="cpu", weights_only=False)
+            selected["selection_criterion"] = "lqr_dagger_after_best_bc"
+            selected["bc_seed"] = best["seed"]
+            torch.save(selected, root_runs / "best.pt")
     summary = {
         "repetitions": reps,
         "seeds": seeds,
-        "selection_criterion": "best_validation_mse",
+        "selection_criterion": selected.get("selection_criterion", "best_validation_mse"),
         "best_seed": best["seed"],
         "best_val": best["best_val"],
         "best_test_loss": best["test_loss"],
-        "seed_results": selected["seed_results"],
+        "seed_results": selected.get("seed_results")
+        or [
+            {
+                "seed": r["seed"],
+                "best_val": r["best_val"],
+                "test_loss": r["test_loss"],
+                "checkpoint": r["checkpoint"],
+            }
+            for r in seed_results
+        ],
         "best_checkpoint": str(root_runs / "best.pt"),
+        "train_recipe": recipe,
+        "dagger": dagger_report,
     }
     with (root_runs / "repetition_summary.json").open("w", encoding="utf-8") as handle:
-        json.dump(summary, handle, indent=2)
+        json.dump(summary, handle, indent=2, default=str)
     return summary

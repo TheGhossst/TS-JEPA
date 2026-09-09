@@ -31,6 +31,9 @@ from ts_jepa.models.actor import SemanticActor
 from ts_jepa.preprocessing.command_stats import CommandNormalizer
 from ts_jepa.runtime import make_dataloader, state_dict_to_cpu
 from ts_jepa.training.actor_helpers import (
+    actor_loss_kwargs,
+    actor_regression_loss,
+    evaluate_actor_objective,
     evaluate_mse,
     mean_command_baseline_mse,
     split_train_val_actor,
@@ -179,10 +182,14 @@ def train_feature_actor(
     hp = _actor_hparams(config)
     epochs = int(max_epochs if max_epochs is not None else hp["epochs"])
     feat_dim = int(train_ds.features.shape[1])
+    arch = config["semantic_actor"]["architecture"]
+    jepa_dim = int(config["ts_jepa"]["encoder"]["embedding_dim"])
     actor = SemanticActor(
         embedding_dim=feat_dim,
         hidden_dims=hp["hidden_dims"],
         dropout=hp["dropout"],
+        layernorm=bool(arch.get("layernorm", False)) and feat_dim == jepa_dim,
+        output_init_scale=float(arch.get("output_init_scale", 1.0)),
     ).to(device)
     if init_state_dict is not None:
         actor.load_state_dict(init_state_dict)
@@ -192,8 +199,12 @@ def train_feature_actor(
         weight_decay=hp["weight_decay"],
     )
     criterion = nn.MSELoss()
+    loss_kwargs = actor_loss_kwargs(config)
     val_fraction = hp["val_fraction"]
-    train_split, val_split = split_train_val_actor(train_ds, val_fraction)
+    split_mode = str(config["semantic_actor"]["early_stopping"].get("split", "contiguous"))
+    train_split, val_split = split_train_val_actor(
+        train_ds, val_fraction, seed=seed, mode=split_mode
+    )
     batch_size = hp["batch_size"]
     train_loader = make_dataloader(
         train_split,
@@ -234,14 +245,16 @@ def train_feature_actor(
             emb = batch["embedding"].to(device)
             target = batch["command"].to(device)
             pred = actor(emb)
-            loss = criterion(pred, target)
+            loss = actor_regression_loss(pred, target, **loss_kwargs)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
             train_loss += float(loss.detach().item())
             n_batches += 1
         train_loss /= max(1, n_batches)
-        val_loss = evaluate_mse(actor, val_loader, device, criterion)
+        val_loss = evaluate_actor_objective(
+            actor, val_loader, device, loss_kwargs=loss_kwargs
+        )
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
         print(f"{epoch_desc}={epoch} train_loss={train_loss:.6f} val_loss={val_loss:.6f}")
         if val_loss < best_val:

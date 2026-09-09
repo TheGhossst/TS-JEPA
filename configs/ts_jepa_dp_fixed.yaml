@@ -1,10 +1,51 @@
 # Experiment overlay for the corrected-DP-teacher dataset (`data_dp_fixed`).
-# Inherits all paper-faithful model/hparams from ts_jepa_baseline.yaml.
-# Only paths / run directory names differ so old `data/` and `runs/ts_jepa/` stay untouched.
+# Inherits model/hparams from ts_jepa_baseline.yaml, then overrides actor
+# training for closed-loop results (not paper Table III).
 _base: ts_jepa_baseline.yaml
+
+plan:
+  enforce: false
+  mode: results
 
 paths:
   data_root: data_dp_fixed
   runs_root: runs
   ts_jepa_dirname: ts_jepa_dp_fixed
   semantic_actor_dirname: semantic_actor_dp_fixed
+
+# Offline BC of the DP teacher shrinks toward the mean (≈60% of u*=0) and
+# early-stops at epoch 1. These settings force large-force recovery and then
+# refine with on-policy LQR DAgger so Eq. (28) can go above zero.
+semantic_actor:
+  architecture:
+    dropout: 0.05
+    layernorm: true
+    output_init_scale: 8.0
+  optimizer:
+    learning_rate: 0.001
+    batch_size: 128
+    weight_decay: 0.05
+  loss: Huber
+  huber_beta: 4.0
+  large_force_weight: 10.0
+  std_match_weight: 0.5
+  grad_clip_norm: 1.0
+  lr_schedule: cosine
+  lr_warmup_epochs: 5
+  early_stopping:
+    patience: 60
+    val_fraction: 0.15
+    min_epochs: 40
+    split: shuffled_trajectories
+  dagger:
+    enabled: true
+    expert: lqr
+    rounds: 6
+    rollouts_per_round: 24
+    epochs_per_round: 15
+    beta_start: 0.9
+    beta_decay: 0.85
+    mix_offline: false
+    mix_mode: convex
+    checkpoint_selection: last
+    run_dirname: semantic_actor_dp_fixed_dagger

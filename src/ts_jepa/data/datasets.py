@@ -171,6 +171,7 @@ class ActorEmbeddingDataset(Dataset):
         self.pipeline = PreprocessPipeline(config, training=False)
         self.files = sorted(self.trajectory_dir.glob("*.npz"))
         self.samples: list[tuple[torch.Tensor, float, float]] = []
+        self.file_lengths: list[int] = []
 
         encoder.eval()
         encode_bs = resolve_encoder_batch_size(device, config.get("runtime"))
@@ -189,7 +190,9 @@ class ActorEmbeddingDataset(Dataset):
                 ]
                 cmds_phys = commands.astype(np.float32, copy=False)
                 cmds_norm = self.normalizer.normalize(cmds_phys)
-                for start in range(0, len(batch_contexts), encode_bs):
+                n_steps = int(len(batch_contexts))
+                self.file_lengths.append(n_steps)
+                for start in range(0, n_steps, encode_bs):
                     chunk = torch.stack(batch_contexts[start : start + encode_bs], dim=0).to(
                         device, non_blocking=device.type == "cuda"
                     )
